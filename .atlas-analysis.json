@@ -1,0 +1,172 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "go-go-scope",
+  "projectDescription": "Structured concurrency for TypeScript using Explicit Resource Management",
+  "theme": "aspen",
+  "primaryColor": "#FF6B35",
+  "lightColor": "#FFB997",
+  "darkColor": "#CC5529",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/structured-concurrency",
+              "concepts/scopes-and-tasks",
+              "concepts/automatic-cleanup",
+              "concepts/cancellation"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/basic-usage",
+              "guides/channels",
+              "guides/parallel-execution",
+              "guides/resilience-patterns",
+              "guides/streams",
+              "guides/scheduler"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/dependency-injection",
+              "advanced/distributed-locks",
+              "advanced/graceful-shutdown",
+              "advanced/metrics-and-tracing",
+              "advanced/worker-threads"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/scope",
+              "api/task",
+              "api/channel",
+              "api/semaphore",
+              "api/circuit-breaker",
+              "api/resource-pool"
+            ]
+          },
+          {
+            "group": "Packages",
+            "pages": [
+              "api/stream",
+              "api/scheduler",
+              "api/testing"
+            ]
+          },
+          {
+            "group": "Persistence Adapters",
+            "pages": [
+              "api/persistence/redis",
+              "api/persistence/postgres",
+              "api/persistence/mysql",
+              "api/persistence/mongodb",
+              "api/persistence/dynamodb",
+              "api/persistence/sqlite"
+            ]
+          },
+          {
+            "group": "Framework Adapters",
+            "pages": [
+              "api/adapters/fastify",
+              "api/adapters/express",
+              "api/adapters/nestjs",
+              "api/adapters/hono",
+              "api/adapters/elysia",
+              "api/adapters/koa",
+              "api/adapters/hapi"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Common Patterns",
+            "pages": [
+              "examples/health-checks",
+              "examples/actor-model",
+              "examples/pipeline-processing",
+              "examples/rate-limiting",
+              "examples/retry-strategies"
+            ]
+          },
+          {
+            "group": "Integration Examples",
+            "pages": [
+              "examples/web-api",
+              "examples/background-jobs",
+              "examples/microservices",
+              "examples/distributed-systems"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Automatic cleanup via using/await using syntax",
+    "Structured concurrency with parent-child cancellation",
+    "Go-style channels and broadcast channels",
+    "Circuit breakers, retries, and timeouts",
+    "Distributed job scheduler with cron support",
+    "Lazy async streams with 50+ operations",
+    "Worker thread pool for CPU-intensive tasks",
+    "Persistence adapters for Redis, PostgreSQL, MySQL, MongoDB, DynamoDB, SQLite",
+    "Framework adapters for Fastify, Express, NestJS, Hono, Elysia, Koa, Hapi",
+    "OpenTelemetry tracing and Prometheus metrics",
+    "Resource pools and distributed locks",
+    "Graceful shutdown handling"
+  ],
+  "publicApiSurface": [
+    "scope(options?)",
+    "Scope",
+    "Task",
+    "Channel",
+    "BroadcastChannel",
+    "Semaphore",
+    "CircuitBreaker",
+    "ResourcePool",
+    "WorkerPool",
+    "TokenBucket",
+    "PriorityChannel",
+    "parallel(tasks, options?)",
+    "race(tasks, options?)",
+    "poll(fn, options)",
+    "Stream",
+    "Scheduler",
+    "RedisAdapter",
+    "PostgresAdapter",
+    "MySQLAdapter",
+    "MongoDBAdapter",
+    "DynamoDBAdapter",
+    "SQLiteAdapter",
+    "fastifyGoGoScope",
+    "expressGoGoScope",
+    "nestjsGoGoScope",
+    "honoGoGoScope",
+    "elysiaGoGoScope",
+    "koaGoGoScope",
+    "hapiGoGoScope"
+  ]
+}
