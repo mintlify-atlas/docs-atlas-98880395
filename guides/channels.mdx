@@ -1,0 +1,495 @@
+---
+title: "Channels"
+description: "Go-style channels for concurrent communication and broadcast patterns"
+---
+
+## Overview
+
+Channels provide Go-style concurrent communication between tasks. They support buffering, backpressure strategies, and automatic cleanup when the scope is disposed.
+
+<Note>
+Channels implement AsyncIterable, so you can use `for await...of` to consume values.
+</Note>
+
+## Basic Channel Usage
+
+Create a buffered channel and use it for producer-consumer communication:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+await using s = scope();
+
+// Create a buffered channel with capacity of 10
+const ch = s.channel<string>(10);
+
+// Producer task
+s.task(async () => {
+  await ch.send('message 1');
+  await ch.send('message 2');
+  await ch.send('message 3');
+  ch.close(); // Signal no more messages
+});
+
+// Consumer task
+s.task(async () => {
+  for await (const msg of ch) {
+    console.log('Received:', msg);
+  }
+  console.log('Channel closed');
+});
+```
+
+## Buffering
+
+### Buffered Channels
+
+Buffered channels can hold multiple values before blocking:
+
+```typescript
+// Create channel with buffer size 5
+const ch = s.channel<number>(5);
+
+// Send up to 5 items without blocking
+await ch.send(1);
+await ch.send(2);
+await ch.send(3);
+await ch.send(4);
+await ch.send(5);
+
+// 6th send will block until someone receives
+await ch.send(6); // Blocks here
+```
+
+### Unbuffered Channels
+
+Unbuffered channels (capacity 0) require sender and receiver to rendezvous:
+
+```typescript
+const ch = s.channel<string>(0);
+
+// Sender and receiver must meet
+s.task(async () => {
+  await ch.send('hello'); // Blocks until received
+});
+
+s.task(async () => {
+  const msg = await ch.receive(); // Blocks until sent
+  console.log(msg);
+});
+```
+
+## Backpressure Strategies
+
+Control what happens when the channel buffer is full:
+
+<CodeGroup>
+
+```typescript Block (Default)
+// Block sender until space is available
+const ch = s.channel<number>({
+  capacity: 10,
+  backpressure: 'block'
+});
+
+// Send blocks when buffer is full
+for (let i = 0; i < 100; i++) {
+  await ch.send(i); // Waits for consumer
+}
+```
+
+```typescript Drop Oldest
+// Drop oldest value when full
+const ch = s.channel<number>({
+  capacity: 10,
+  backpressure: 'drop-oldest',
+  onDrop: (value) => {
+    console.log('Dropped:', value);
+  }
+});
+
+// Never blocks, drops old values
+for (let i = 0; i < 100; i++) {
+  await ch.send(i); // Immediate
+}
+```
+
+```typescript Drop Latest
+// Drop new value when full
+const ch = s.channel<number>({
+  capacity: 10,
+  backpressure: 'drop-latest',
+  onDrop: (value) => {
+    console.log('Dropped new value:', value);
+  }
+});
+```
+
+```typescript Error on Full
+// Throw error when full
+const ch = s.channel<number>({
+  capacity: 10,
+  backpressure: 'error'
+});
+
+try {
+  for (let i = 0; i < 20; i++) {
+    await ch.send(i); // Throws ChannelFullError
+  }
+} catch (err) {
+  console.error('Channel full!');
+}
+```
+
+```typescript Sample
+// Keep only recent values within time window
+const ch = s.channel<number>({
+  capacity: 10,
+  backpressure: 'sample',
+  sampleWindow: 1000, // 1 second
+  onDrop: (value) => {
+    console.log('Expired:', value);
+  }
+});
+```
+
+</CodeGroup>
+
+## Channel Operations
+
+### Send and Receive
+
+```typescript
+const ch = s.channel<string>(10);
+
+// Send a value (returns false if closed)
+const sent = await ch.send('hello');
+
+// Receive a value (returns undefined if closed and empty)
+const msg = await ch.receive();
+if (msg !== undefined) {
+  console.log('Received:', msg);
+}
+
+// Close the channel
+ch.close();
+
+// Check if closed
+if (ch.isClosed) {
+  console.log('Channel is closed');
+}
+```
+
+### Transformations
+
+Channels support functional transformations:
+
+<Steps>
+
+<Step title="Map">
+Transform each value:
+
+```typescript
+const numbers = s.channel<number>(10);
+const doubled = numbers.map(x => x * 2);
+
+await numbers.send(5);
+const result = await doubled.receive(); // 10
+```
+</Step>
+
+<Step title="Filter">
+Filter values based on a predicate:
+
+```typescript
+const numbers = s.channel<number>(10);
+const evens = numbers.filter(x => x % 2 === 0);
+
+await numbers.send(1);
+await numbers.send(2);
+await numbers.send(3);
+
+const first = await evens.receive(); // 2
+const second = await evens.receive(); // undefined (1 and 3 filtered)
+```
+</Step>
+
+<Step title="Reduce">
+Accumulate values:
+
+```typescript
+const numbers = s.channel<number>(10);
+
+const sumPromise = numbers.reduce((acc, x) => acc + x, 0);
+
+await numbers.send(1);
+await numbers.send(2);
+await numbers.send(3);
+numbers.close();
+
+const sum = await sumPromise; // 6
+```
+</Step>
+
+<Step title="Take">
+Limit the number of values:
+
+```typescript
+const numbers = s.channel<number>(10);
+const first3 = numbers.take(3);
+
+for await (const n of first3) {
+  console.log(n); // Stops after 3 values
+}
+```
+</Step>
+
+</Steps>
+
+## Broadcast Channels
+
+Broadcast channels send each message to ALL subscribers (pub/sub pattern):
+
+```typescript
+await using s = scope();
+
+const broadcast = s.broadcast<string>();
+
+// Subscribe consumer 1
+s.task(async () => {
+  for await (const msg of broadcast.subscribe()) {
+    console.log('Consumer 1:', msg);
+  }
+});
+
+// Subscribe consumer 2
+s.task(async () => {
+  for await (const msg of broadcast.subscribe()) {
+    console.log('Consumer 2:', msg);
+  }
+});
+
+// Producer - all subscribers receive each message
+s.task(async () => {
+  await broadcast.send('hello');
+  await broadcast.send('world');
+  broadcast.close();
+});
+
+// Output:
+// Consumer 1: hello
+// Consumer 2: hello
+// Consumer 1: world
+// Consumer 2: world
+```
+
+### Broadcast Properties
+
+```typescript
+const broadcast = s.broadcast<string>();
+
+// Get subscriber count
+console.log(broadcast.subscriberCount); // 0
+
+// Check if closed
+if (broadcast.isClosed) {
+  console.log('Broadcast is closed');
+}
+```
+
+## Select Statement
+
+Go-style select to wait on multiple channels:
+
+```typescript
+await using s = scope();
+
+const ch1 = s.channel<string>(10);
+const ch2 = s.channel<number>(10);
+
+// Wait for first channel to receive a value
+const [err, result] = await s.select(
+  new Map([
+    [ch1, async (msg) => `String: ${msg}`],
+    [ch2, async (num) => `Number: ${num}`],
+  ]),
+  { timeout: 5000 }
+);
+
+if (!err) {
+  console.log(result); // Result from whichever channel received first
+}
+```
+
+## Producer-Consumer Pattern
+
+Classic pattern with multiple producers and consumers:
+
+```typescript
+await using s = scope();
+
+const jobs = s.channel<number>(100);
+const results = s.channel<number>(100);
+
+// Multiple producers
+for (let i = 0; i < 3; i++) {
+  s.task(async ({ signal }) => {
+    for (let j = 0; j < 10; j++) {
+      if (signal.aborted) break;
+      await jobs.send(i * 10 + j);
+    }
+  });
+}
+
+// Multiple consumers
+for (let i = 0; i < 5; i++) {
+  s.task(async () => {
+    for await (const job of jobs) {
+      const result = await processJob(job);
+      await results.send(result);
+    }
+  });
+}
+
+// Collector
+s.task(async () => {
+  for await (const result of results) {
+    console.log('Result:', result);
+  }
+});
+
+// Close jobs channel when all producers are done
+Promise.all(producers).then(() => jobs.close());
+```
+
+## Pipeline Pattern
+
+Chain processing stages with channels:
+
+```typescript
+await using s = scope();
+
+// Stage 1: Generate numbers
+const stage1 = s.channel<number>(10);
+s.task(async () => {
+  for (let i = 1; i <= 100; i++) {
+    await stage1.send(i);
+  }
+  stage1.close();
+});
+
+// Stage 2: Square numbers
+const stage2 = stage1.map(x => x * x);
+
+// Stage 3: Filter even squares
+const stage3 = stage2.filter(x => x % 2 === 0);
+
+// Stage 4: Take first 5
+const stage4 = stage3.take(5);
+
+// Consumer
+for await (const n of stage4) {
+  console.log(n); // 4, 16, 36, 64, 100
+}
+```
+
+## Fan-Out / Fan-In
+
+<Accordion title="Fan-Out: One producer, multiple consumers">
+```typescript
+await using s = scope();
+
+const input = s.channel<number>(10);
+
+// Single producer
+s.task(async () => {
+  for (let i = 0; i < 100; i++) {
+    await input.send(i);
+  }
+  input.close();
+});
+
+// Multiple consumers (fan-out)
+const workers = 5;
+for (let i = 0; i < workers; i++) {
+  s.task(async ({ logger }) => {
+    for await (const item of input) {
+      logger.info(`Worker ${i} processing ${item}`);
+      await process(item);
+    }
+  });
+}
+```
+</Accordion>
+
+<Accordion title="Fan-In: Multiple producers, one consumer">
+```typescript
+await using s = scope();
+
+const output = s.channel<number>(100);
+
+// Multiple producers (fan-in)
+const producers = 5;
+for (let i = 0; i < producers; i++) {
+  s.task(async () => {
+    for (let j = 0; j < 20; j++) {
+      await output.send(i * 20 + j);
+    }
+  });
+}
+
+// Single consumer
+s.task(async () => {
+  for await (const item of output) {
+    console.log('Received:', item);
+  }
+});
+```
+</Accordion>
+
+## Error Handling
+
+Channels integrate with scope cancellation:
+
+```typescript
+await using s = scope({ timeout: 5000 });
+
+const ch = s.channel<string>(10);
+
+try {
+  // If scope times out, send/receive are aborted
+  await ch.send('message');
+} catch (err) {
+  console.error('Channel operation cancelled');
+}
+
+// Channels are automatically closed when scope is disposed
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Close Producers" icon="circle-xmark">
+    Always close channels when done sending to signal completion to consumers.
+  </Card>
+  <Card title="Use Buffering" icon="layer-group">
+    Buffer channels to decouple producer and consumer speeds.
+  </Card>
+  <Card title="Handle Backpressure" icon="gauge-high">
+    Choose the right backpressure strategy for your use case.
+  </Card>
+  <Card title="Check Closed" icon="circle-check">
+    Check `isClosed` before sending to avoid errors.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Parallel Execution" icon="layer-group" href="/guides/parallel-execution">
+    Run multiple tasks concurrently with channels
+  </Card>
+  <Card title="Streams" icon="water" href="/guides/streams">
+    Use streams for lazy async iterable processing
+  </Card>
+</CardGroup>

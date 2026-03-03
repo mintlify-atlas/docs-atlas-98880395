@@ -1,0 +1,380 @@
+---
+title: Hono Adapter
+description: Lightweight middleware for Hono applications
+---
+
+The Hono adapter provides minimal-overhead integration of go-go-scope with Hono's fast web framework.
+
+## Installation
+
+```bash
+npm install @go-go-scope/adapter-hono go-go-scope hono
+```
+
+## Quick Start
+
+```typescript
+import { Hono } from 'hono'
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+const app = new Hono()
+
+// Apply middleware
+app.use(goGoScope({
+  name: 'hono-api',
+  timeout: 30000 // Optional: default timeout for all requests
+}))
+
+app.get('/users/:id', async (c) => {
+  const scope = getScope(c)
+  
+  const [err, user] = await scope.task(
+    () => fetchUser(c.req.param('id')),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) {
+    return c.json({ error: err.message }, 500)
+  }
+  return c.json(user)
+})
+
+export default app
+```
+
+## Configuration Options
+
+<ParamField path="name" type="string" default="'hono-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+## Middleware Architecture
+
+<Steps>
+  <Step title="Root Scope Creation">
+    A singleton root scope is created on first middleware invocation
+  </Step>
+  
+  <Step title="Context Variables">
+    Request scope is stored in Hono's context via `c.set('scope', requestScope)`
+  </Step>
+  
+  <Step title="Request Scope">
+    Each request gets a unique child scope accessible via `getScope(c)`
+  </Step>
+  
+  <Step title="Automatic Cleanup">
+    Request scopes are disposed automatically after the response completes
+  </Step>
+</Steps>
+
+## Helper Functions
+
+### getScope(c)
+
+Retrieves the request-scoped scope from the Hono context.
+
+```typescript
+import { getScope } from '@go-go-scope/adapter-hono'
+
+app.get('/data', async (c) => {
+  const scope = getScope(c)
+  const [err, data] = await scope.task(() => fetchData())
+  return c.json(data)
+})
+```
+
+### getRootScope(c)
+
+Retrieves the root application scope from the Hono context.
+
+```typescript
+import { getRootScope } from '@go-go-scope/adapter-hono'
+
+app.get('/health', async (c) => {
+  const rootScope = getRootScope(c)
+  // Access application-level scope
+  return c.json({ status: 'ok' })
+})
+```
+
+## Usage Examples
+
+### REST API with Error Handling
+
+<CodeGroup>
+```typescript GET
+import { Hono } from 'hono'
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+const app = new Hono()
+app.use(goGoScope())
+
+app.get('/posts/:id', async (c) => {
+  const scope = getScope(c)
+  const [err, post] = await scope.task(
+    () => db.posts.findById(c.req.param('id'))
+  )
+
+  if (err) return c.json({ error: 'Not found' }, 404)
+  return c.json(post)
+})
+```
+
+```typescript POST
+app.post('/posts', async (c) => {
+  const scope = getScope(c)
+  const body = await c.req.json()
+  
+  const [err, post] = await scope.task(
+    () => db.posts.create(body),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) return c.json({ error: err.message }, 500)
+  return c.json(post, 201)
+})
+```
+
+```typescript DELETE
+app.delete('/posts/:id', async (c) => {
+  const scope = getScope(c)
+  const [err] = await scope.task(
+    () => db.posts.delete(c.req.param('id'))
+  )
+
+  if (err) return c.json({ error: err.message }, 500)
+  return c.body(null, 204)
+})
+```
+</CodeGroup>
+
+### Parallel Data Fetching
+
+```typescript
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+app.get('/dashboard/:userId', async (c) => {
+  const scope = getScope(c)
+  const userId = c.req.param('userId')
+
+  const [err, results] = await scope.parallel([
+    () => fetchProfile(userId),
+    () => fetchPosts(userId),
+    () => fetchFollowers(userId)
+  ])
+
+  if (err) {
+    return c.json({ error: 'Failed to load dashboard' }, 500)
+  }
+
+  return c.json({
+    profile: results[0],
+    posts: results[1],
+    followers: results[2]
+  })
+})
+```
+
+### Server-Sent Events (SSE)
+
+```typescript
+import { streamSSE } from 'hono/streaming'
+
+app.get('/events', async (c) => {
+  const scope = getScope(c)
+  const channel = scope.channel({ buffer: 100 })
+
+  // Producer
+  scope.task(async ({ signal }) => {
+    for (let i = 0; i < 50; i++) {
+      if (signal.aborted) break
+      await channel.send({ event: 'update', data: i })
+      await new Promise(r => setTimeout(r, 1000))
+    }
+    channel.close()
+  })
+
+  // Consumer: stream to SSE
+  return streamSSE(c, async (stream) => {
+    for await (const message of channel) {
+      await stream.writeSSE({
+        data: JSON.stringify(message),
+        event: 'update'
+      })
+    }
+  })
+})
+```
+
+### Middleware Composition
+
+```typescript
+import { Hono } from 'hono'
+import { logger } from 'hono/logger'
+import { cors } from 'hono/cors'
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+const app = new Hono()
+
+// Apply middleware in order
+app.use(logger())
+app.use(cors())
+app.use(goGoScope({ name: 'api' }))
+
+app.get('/data', async (c) => {
+  const scope = getScope(c)
+  // Scope is available after goGoScope middleware
+  const [err, data] = await scope.task(() => fetchData())
+  return c.json(data)
+})
+```
+
+### Circuit Breaker Pattern
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+const breaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000
+})
+
+app.use(goGoScope({ name: 'resilient-api' }))
+
+app.get('/external', async (c) => {
+  const scope = getScope(c)
+  
+  const [err, data] = await scope.task(async ({ signal }) => {
+    return breaker.execute(() =>
+      fetch('https://external-api.com/data', { signal })
+    )
+  })
+
+  if (err) {
+    if (breaker.state === 'open') {
+      return c.json({ error: 'Service unavailable' }, 503)
+    }
+    return c.json({ error: err.message }, 500)
+  }
+
+  return c.json(await data.json())
+})
+```
+
+### Cloudflare Workers
+
+The adapter works seamlessly with Cloudflare Workers:
+
+```typescript
+import { Hono } from 'hono'
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+const app = new Hono()
+app.use(goGoScope({ name: 'worker' }))
+
+app.get('/api/data', async (c) => {
+  const scope = getScope(c)
+  
+  const [err, data] = await scope.task(
+    () => fetch('https://api.example.com/data').then(r => r.json()),
+    { timeout: 5000, retry: 'exponential' }
+  )
+
+  if (err) return c.json({ error: err.message }, 500)
+  return c.json(data)
+})
+
+export default app
+```
+
+## Type Safety
+
+The adapter extends Hono's `ContextVariableMap`:
+
+```typescript
+declare module 'hono' {
+  interface ContextVariableMap {
+    scope: Scope<Record<string, unknown>>
+    rootScope: Scope<Record<string, unknown>>
+  }
+}
+```
+
+This enables full type safety:
+
+```typescript
+app.get('/typed', async (c) => {
+  // TypeScript knows c.get('scope') returns Scope
+  const scope = c.get('scope')
+  const [err, data] = await scope.task(() => fetchData())
+  return c.json(data)
+})
+```
+
+## Edge Runtime Support
+
+The adapter is compatible with edge runtimes:
+
+- Cloudflare Workers
+- Deno Deploy
+- Vercel Edge Functions
+- Bun
+
+```typescript
+// Bun example
+import { Hono } from 'hono'
+import { goGoScope, getScope } from '@go-go-scope/adapter-hono'
+
+const app = new Hono()
+app.use(goGoScope())
+
+app.get('/', (c) => c.text('Hello from Bun!'))
+
+export default {
+  port: 3000,
+  fetch: app.fetch
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use getScope() for type safety">
+    Always use the `getScope(c)` helper instead of `c.get('scope')` for better type inference.
+  </Accordion>
+
+  <Accordion title="Apply middleware early">
+    Register `goGoScope()` middleware before route handlers to ensure scopes are available.
+  </Accordion>
+
+  <Accordion title="Handle errors consistently">
+    Always destructure and check errors from task results for robust error handling.
+  </Accordion>
+
+  <Accordion title="Leverage Hono's lightweight design">
+    The adapter adds minimal overhead, preserving Hono's performance characteristics.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Elysia Adapter" icon="zap" href="/api/adapters/elysia">
+    Native Bun-first Elysia integration
+  </Card>
+  <Card title="Fastify Adapter" icon="bolt" href="/api/adapters/fastify">
+    Fastify plugin integration
+  </Card>
+  <Card title="Cloudflare Workers" icon="cloud" href="/examples/cloudflare-workers">
+    Deploy to Cloudflare Workers
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

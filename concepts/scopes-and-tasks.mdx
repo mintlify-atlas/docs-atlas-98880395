@@ -1,0 +1,479 @@
+---
+title: Scopes and Tasks
+description: Deep dive into the Scope and Task classes that power structured concurrency
+---
+
+## The Scope Class
+
+The `Scope` class is the foundational primitive for structured concurrency. It manages the lifetime of concurrent operations and ensures proper cleanup.
+
+### Creating Scopes
+
+```typescript
+import { scope } from 'go-go-scope';
+
+// Basic scope
+await using s = scope();
+
+// Scope with timeout
+await using s = scope({ 
+  timeout: 5000 // Auto-cancel after 5 seconds
+});
+
+// Scope with name (useful for debugging)
+await using s = scope({ 
+  name: 'api-request',
+  timeout: 3000
+});
+
+// Scope with concurrency limit
+await using s = scope({
+  concurrency: 3 // Max 3 tasks running concurrently
+});
+```
+
+**Location in source:** `/home/daytona/workspace/source/packages/go-go-scope/src/scope.ts:189-373`
+
+### Scope Options
+
+<CodeGroup>
+```typescript Basic Options
+interface ScopeOptions {
+  // Optional timeout in milliseconds
+  timeout?: number;
+  
+  // Optional name for debugging
+  name?: string;
+  
+  // Optional parent AbortSignal
+  signal?: AbortSignal;
+  
+  // Optional parent scope
+  parent?: Scope;
+}
+```
+
+```typescript Advanced Options
+interface ScopeOptions {
+  // Concurrency limit for tasks
+  concurrency?: number;
+  
+  // Circuit breaker configuration
+  circuitBreaker?: {
+    failureThreshold: number;
+    resetTimeout: number;
+  };
+  
+  // Lifecycle hooks
+  hooks?: {
+    beforeTask?: (name: string, index: number) => void;
+    afterTask?: (name: string, duration: number, error?: unknown) => void;
+  };
+  
+  // Logger instance
+  logger?: Logger;
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+}
+```
+</CodeGroup>
+
+### The AbortSignal
+
+Every scope has an `AbortSignal` that propagates cancellation:
+
+```typescript
+await using s = scope({ timeout: 1000 });
+
+console.log(s.signal.aborted); // false
+
+await new Promise(resolve => setTimeout(resolve, 1100));
+
+console.log(s.signal.aborted); // true (timeout exceeded)
+console.log(s.signal.reason); // Error: Scope timeout after 1000ms
+```
+
+<Note>
+The `signal` property is the core mechanism for cancellation propagation. Always pass it to async operations that support cancellation.
+</Note>
+
+## The Task Class
+
+The `Task` class represents a single unit of concurrent work. It's a lazy, disposable promise that integrates with the scope lifecycle.
+
+**Location in source:** `/home/daytona/workspace/source/packages/go-go-scope/src/task.ts:25-182`
+
+### Creating Tasks
+
+Tasks are created via the `scope.task()` method:
+
+```typescript
+await using s = scope();
+
+// Simple task
+const task = s.task(async ({ signal }) => {
+  const response = await fetch('https://api.example.com/data', { signal });
+  return response.json();
+});
+
+// Task returns Result tuple: [error, value]
+const [err, data] = await task;
+if (err) {
+  console.error('Task failed:', err);
+} else {
+  console.log('Data:', data);
+}
+```
+
+### Task Context
+
+Every task receives a context object with useful properties:
+
+```typescript
+await using s = scope();
+
+const task = s.task(async (ctx) => {
+  // AbortSignal for cancellation
+  ctx.signal.addEventListener('abort', () => {
+    console.log('Task was cancelled!');
+  });
+  
+  // Services from dependency injection
+  const db = ctx.services.database;
+  
+  // Logger with task context
+  ctx.logger.info('Task started');
+  
+  // Additional context
+  console.log(ctx.context); // Custom data from scope
+  
+  return await someOperation();
+});
+```
+
+**Context structure:**
+
+```typescript
+interface TaskContext<Services> {
+  // AbortSignal for cancellation
+  signal: AbortSignal;
+  
+  // Services provided via DI
+  services: Services;
+  
+  // Logger with task name/index
+  logger: Logger;
+  
+  // User-defined context data
+  context: Record<string, unknown>;
+  
+  // Checkpoint utilities (if configured)
+  checkpoint?: {
+    save: (data: unknown) => Promise<void>;
+    data?: unknown;
+  };
+  
+  // Progress tracking (if configured)
+  progress?: {
+    update: (percentage: number) => void;
+    get: () => { percentage: number };
+  };
+}
+```
+
+### Task Lifecycle
+
+Tasks have a specific lifecycle:
+
+```typescript
+await using s = scope();
+
+const task = s.task(async ({ signal }) => {
+  console.log('Task executing');
+  await delay(100);
+  return 'done';
+});
+
+console.log(task.isStarted);  // false (lazy execution)
+console.log(task.isSettled);  // false
+
+// Task starts when awaited or .then() is called
+const [err, result] = await task;
+
+console.log(task.isStarted);  // true
+console.log(task.isSettled);  // true
+```
+
+<Tip>
+Tasks use lazy execution - they only start when you await them or call `.then()`. This allows for efficient task composition.
+</Tip>
+
+## Parent-Child Relationships
+
+### Scope Hierarchy
+
+Scopes can create child scopes, forming a tree structure:
+
+```typescript
+await using parent = scope({ name: 'parent' });
+
+// Create child scopes
+const child1 = parent.createChild({ name: 'child-1' });
+const child2 = parent.createChild({ name: 'child-2' });
+
+// Children inherit parent's signal
+parent.signal.addEventListener('abort', () => {
+  console.log('Parent aborted');
+});
+
+child1.signal.addEventListener('abort', () => {
+  console.log('Child 1 aborted');
+});
+
+// Aborting parent automatically aborts children
+await parent[Symbol.asyncDispose]();
+// Output:
+// Parent aborted
+// Child 1 aborted
+```
+
+**Hierarchy diagram:**
+
+```typescript
+await using root = scope({ name: 'root' });
+const api = root.createChild({ name: 'api' });
+const db = root.createChild({ name: 'database' });
+const cache = api.createChild({ name: 'cache' });
+
+console.log(root.debugTree());
+// Output:
+// 📦 root (id: 1)
+//    ├─ 📦 api (id: 2)
+//    │  └─ 📦 cache (id: 3)
+//    └─ 📦 database (id: 4)
+```
+
+### Signal Inheritance
+
+Child scopes inherit cancellation from parents:
+
+```typescript
+await using parent = scope({ timeout: 1000 });
+const child = parent.createChild();
+
+child.task(async ({ signal }) => {
+  // This signal will abort when parent times out
+  await longRunningOperation(signal);
+});
+
+// After 1000ms, parent timeout triggers:
+// 1. Parent signal aborts
+// 2. Child signal aborts (inherited)
+// 3. All tasks in both scopes are cancelled
+```
+
+## Task Options
+
+Tasks support various options for advanced control:
+
+```typescript
+await using s = scope();
+
+// Task with retry
+const task1 = s.task(async () => {
+  return await flakeyOperation();
+}, {
+  retry: {
+    maxRetries: 3,
+    delay: 1000 // 1 second between retries
+  }
+});
+
+// Task with timeout
+const task2 = s.task(async () => {
+  return await slowOperation();
+}, {
+  timeout: 5000 // Task-specific timeout
+});
+
+// Task with deduplication
+const task3 = s.task(async () => {
+  return await fetch('/api/user/1');
+}, {
+  dedupe: 'user:1' // Share result with other tasks using same key
+});
+
+// Task with memoization
+const task4 = s.task(async () => {
+  return await expensiveComputation();
+}, {
+  memo: {
+    key: 'computation:1',
+    ttl: 60000 // Cache result for 1 minute
+  }
+});
+```
+
+<CodeGroup>
+```typescript Retry Options
+interface RetryOptions {
+  maxRetries?: number;
+  delay?: number | ((attempt: number, error: unknown) => number);
+  retryCondition?: (error: unknown) => boolean;
+  onRetry?: (error: unknown, attempt: number) => void;
+}
+
+// Shorthand options
+const task = s.task(async () => {
+  // ...
+}, {
+  retry: 'exponential' // Built-in exponential backoff
+});
+```
+
+```typescript Checkpoint Options
+interface CheckpointOptions {
+  interval?: number; // Auto-checkpoint interval
+  maxCheckpoints?: number; // Max checkpoints to keep
+  onCheckpoint?: (checkpoint: Checkpoint) => void;
+  onResume?: (checkpoint: Checkpoint) => void;
+}
+
+const task = s.task(async ({ checkpoint }) => {
+  for (let i = 0; i < 1000; i++) {
+    await processItem(i);
+    
+    // Save progress
+    await checkpoint?.save({ processed: i });
+  }
+}, {
+  checkpoint: {
+    interval: 5000 // Auto-save every 5 seconds
+  }
+});
+```
+</CodeGroup>
+
+## Service Injection
+
+Scopes support dependency injection for sharing resources:
+
+```typescript
+// Provide services
+await using s = scope();
+
+s.provide('database', createDatabase());
+s.provide('cache', createCache());
+s.provide('logger', createLogger());
+
+// Tasks can access services
+const task = s.task(async ({ services }) => {
+  const user = await services.database.query('SELECT * FROM users WHERE id = ?', [1]);
+  await services.cache.set('user:1', user);
+  services.logger.info('User loaded', { userId: 1 });
+  return user;
+});
+```
+
+**Service disposal:**
+
+```typescript
+await using s = scope();
+
+const db = createDatabase();
+
+// Provide service with disposal function
+s.provide('database', db, async (db) => {
+  await db.close(); // Called when scope is disposed
+});
+
+// When scope exits, database is automatically closed
+```
+
+## Real-World Example: API Request Handler
+
+```typescript
+import { scope } from 'go-go-scope';
+
+class ApiClient {
+  async getUserWithPosts(userId: string) {
+    // Create scope for this operation
+    await using s = scope({ 
+      name: `get-user-${userId}`,
+      timeout: 10000 // 10 second timeout for entire operation
+    });
+    
+    // Spawn parallel tasks
+    const userTask = s.task(async ({ signal }) => {
+      const res = await fetch(`/api/users/${userId}`, { signal });
+      return res.json();
+    }, {
+      retry: 'exponential', // Retry with backoff on failure
+      dedupe: `user:${userId}` // Deduplicate concurrent requests
+    });
+    
+    const postsTask = s.task(async ({ signal }) => {
+      const res = await fetch(`/api/users/${userId}/posts`, { signal });
+      return res.json();
+    }, {
+      retry: 'exponential'
+    });
+    
+    // Wait for both tasks
+    const [userErr, user] = await userTask;
+    const [postsErr, posts] = await postsTask;
+    
+    // Handle errors
+    if (userErr) throw new Error(`Failed to load user: ${userErr.message}`);
+    if (postsErr) throw new Error(`Failed to load posts: ${postsErr.message}`);
+    
+    return { ...user, posts };
+    
+    // ✅ All tasks automatically cancelled if scope exits early
+    // ✅ All resources cleaned up in LIFO order
+  }
+}
+```
+
+<Warning>
+Always handle task errors properly. Unhandled errors in tasks are returned as part of the Result tuple, not thrown.
+</Warning>
+
+## Debugging Scopes
+
+Use the built-in debugging utilities:
+
+```typescript
+await using s = scope({ name: 'root' });
+const child1 = s.createChild({ name: 'api' });
+const child2 = s.createChild({ name: 'db' });
+
+// ASCII tree
+console.log(s.debugTree());
+// 📦 root (id: 1)
+//    ├─ 📦 api (id: 2)
+//    └─ 📦 db (id: 3)
+
+// Mermaid diagram
+console.log(s.debugTree({ format: 'mermaid' }));
+// graph TD
+//     scope_1[📦 root]
+//     scope_1 --> scope_2[📦 api]
+//     scope_1 --> scope_3[📦 db]
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Automatic Cleanup" icon="broom" href="/concepts/automatic-cleanup">
+    Learn about disposal patterns and LIFO cleanup
+  </Card>
+  <Card title="Cancellation" icon="stop" href="/concepts/cancellation">
+    Master cancellation propagation with AbortSignal
+  </Card>
+  <Card title="Parallel Execution" icon="arrows-split-up-and-left" href="/guides/parallel">
+    Run multiple tasks concurrently
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Handle errors with Result tuples
+  </Card>
+</CardGroup>

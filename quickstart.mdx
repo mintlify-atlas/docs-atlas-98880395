@@ -1,80 +1,377 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Build your first concurrent application with go-go-scope in 5 minutes
 ---
 
-## Get started in three steps
+# Quick Start
 
-Get your documentation site running locally and make your first customization.
+This guide will get you up and running with go-go-scope in minutes. You'll learn the core patterns for structured concurrency and automatic resource cleanup.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- Node.js 24+ or Bun 1.2+
+- TypeScript 5.2+
+- Basic understanding of async/await
 
-### Step 2: Deploy your changes
+<Tip>
+If you haven't installed go-go-scope yet, see the [Installation](/getting-started/installation) guide.
+</Tip>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Your First Scope
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+The `scope()` function creates a structured concurrency boundary with automatic cleanup:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```typescript
+import { scope } from "go-go-scope";
 
-### Step 3: Go live
+// Create a scope with automatic cleanup
+await using s = scope();
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+const [err, result] = await s.task(async () => {
+  return "Hello, structured concurrency!";
+});
 
-## Next steps
+if (err) {
+  console.error("Task failed:", err);
+} else {
+  console.log("Success:", result);
+}
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+// Scope automatically cleaned up here
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+The `await using` syntax ensures the scope is disposed when it goes out of block scope, even if an error occurs.
 </Note>
+
+## Result Tuples
+
+go-go-scope uses **Result tuples** instead of try/catch for error handling:
+
+```typescript
+const [error, value] = await s.task(() => fetchData());
+
+if (error) {
+  // Handle error case
+  return;
+}
+
+// TypeScript knows value is defined here
+console.log(value.data);
+```
+
+This pattern:
+- Eliminates forgotten error handling
+- Makes error cases explicit
+- Provides better type safety
+
+## Running Tasks in Parallel
+
+Execute multiple tasks concurrently with automatic result collection:
+
+```typescript
+await using s = scope();
+
+const results = await s.parallel([
+  () => fetchUser(123),
+  () => fetchPosts(123),
+  () => fetchComments(123),
+]);
+
+// Results are in the same order as input
+const [userErr, user] = results[0];
+const [postsErr, posts] = results[1];
+const [commentsErr, comments] = results[2];
+```
+
+### Concurrency Limits
+
+Control how many tasks run simultaneously:
+
+```typescript
+const userIds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+const results = await s.parallel(
+  userIds.map((id) => () => fetchUser(id)),
+  { concurrency: 3 } // Only 3 requests at a time
+);
+```
+
+## Timeouts
+
+Set deadlines for operations:
+
+```typescript
+await using s = scope({ timeout: 5000 }); // 5 second timeout
+
+const [err, data] = await s.task(() => slowOperation());
+
+if (err) {
+  console.error("Operation timed out or failed");
+}
+```
+
+Per-task timeouts:
+
+```typescript
+const [err, result] = await s.task(
+  () => fetchData(),
+  { timeout: 2000 } // This task has 2 second timeout
+);
+```
+
+## Automatic Cancellation
+
+When a scope is disposed, **all running tasks are cancelled**:
+
+```typescript
+{
+  await using s = scope();
+  
+  s.task(async ({ signal }) => {
+    // Long-running operation
+    const response = await fetch("https://api.example.com/data", { signal });
+    return response.json();
+  });
+  
+  // Scope disposed here - fetch is automatically cancelled
+}
+```
+
+<Warning>
+Always pass the `signal` to operations that support cancellation (fetch, database queries, etc.).
+</Warning>
+
+## Complete Example: API Request Pipeline
+
+Here's a realistic example combining multiple features:
+
+<Steps>
+  <Step title="Create scope with timeout">
+    Set an overall deadline for the operation:
+    
+    ```typescript
+    await using s = scope({ timeout: 10000 });
+    ```
+  </Step>
+  
+  <Step title="Fetch user data">
+    Get the user with error handling:
+    
+    ```typescript
+    const [userErr, user] = await s.task(
+      async ({ signal }) => {
+        const response = await fetch(
+          `https://api.example.com/users/${userId}`,
+          { signal }
+        );
+        return response.json();
+      },
+      { timeout: 3000 } // Per-task timeout
+    );
+    
+    if (userErr) {
+      console.error("Failed to fetch user:", userErr);
+      return;
+    }
+    ```
+  </Step>
+  
+  <Step title="Fetch related data in parallel">
+    Get posts and comments concurrently:
+    
+    ```typescript
+    const results = await s.parallel([
+      async ({ signal }) => {
+        const res = await fetch(
+          `https://api.example.com/posts?userId=${user.id}`,
+          { signal }
+        );
+        return res.json();
+      },
+      async ({ signal }) => {
+        const res = await fetch(
+          `https://api.example.com/comments?userId=${user.id}`,
+          { signal }
+        );
+        return res.json();
+      },
+    ]);
+    
+    const [postsErr, posts] = results[0];
+    const [commentsErr, comments] = results[1];
+    ```
+  </Step>
+  
+  <Step title="Process results">
+    Combine the data:
+    
+    ```typescript
+    return {
+      user,
+      posts: postsErr ? [] : posts,
+      comments: commentsErr ? [] : comments,
+    };
+    ```
+  </Step>
+</Steps>
+
+### Full Code
+
+```typescript
+import { scope } from "go-go-scope";
+
+async function getUserDashboard(userId: number) {
+  await using s = scope({ timeout: 10000 });
+
+  // Fetch user
+  const [userErr, user] = await s.task(
+    async ({ signal }) => {
+      const response = await fetch(
+        `https://api.example.com/users/${userId}`,
+        { signal }
+      );
+      return response.json();
+    },
+    { timeout: 3000 }
+  );
+
+  if (userErr) {
+    console.error("Failed to fetch user:", userErr);
+    return null;
+  }
+
+  // Fetch posts and comments in parallel
+  const results = await s.parallel([
+    async ({ signal }) => {
+      const res = await fetch(
+        `https://api.example.com/posts?userId=${user.id}`,
+        { signal }
+      );
+      return res.json();
+    },
+    async ({ signal }) => {
+      const res = await fetch(
+        `https://api.example.com/comments?userId=${user.id}`,
+        { signal }
+      );
+      return res.json();
+    },
+  ]);
+
+  const [postsErr, posts] = results[0];
+  const [commentsErr, comments] = results[1];
+
+  return {
+    user,
+    posts: postsErr ? [] : posts,
+    comments: commentsErr ? [] : comments,
+  };
+}
+
+// Usage
+const dashboard = await getUserDashboard(123);
+console.log(dashboard);
+```
+
+## Go-Style Channels
+
+Communicate between concurrent tasks using channels:
+
+```typescript
+await using s = scope();
+
+// Create a channel with buffer capacity
+const ch = s.channel<number>({ capacity: 10 });
+
+// Producer task
+s.task(async () => {
+  for (let i = 0; i < 100; i++) {
+    await ch.send(i);
+  }
+  ch.close();
+});
+
+// Consumer task
+s.task(async () => {
+  for await (const value of ch) {
+    console.log("Received:", value);
+  }
+});
+```
+
+## Retry with Backoff
+
+Automatically retry failed operations:
+
+```typescript
+const [err, data] = await s.task(
+  () => unreliableApiCall(),
+  {
+    retry: {
+      maxAttempts: 3,
+      delay: (attempt) => Math.pow(2, attempt) * 1000, // Exponential backoff
+    },
+  }
+);
+```
+
+Or use built-in strategies:
+
+```typescript
+import { exponentialBackoff } from "go-go-scope";
+
+const [err, data] = await s.task(
+  () => unreliableApiCall(),
+  {
+    retry: {
+      maxAttempts: 5,
+      delay: exponentialBackoff({ baseDelay: 1000, maxDelay: 30000 }),
+    },
+  }
+);
+```
+
+## Circuit Breaker
+
+Prevent cascading failures with circuit breaker pattern:
+
+```typescript
+import { scope, CircuitBreaker } from "go-go-scope";
+
+const breaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 60000, // 1 minute
+});
+
+await using s = scope({ circuitBreaker: breaker });
+
+const [err, data] = await s.task(() => externalServiceCall());
+
+if (err) {
+  // Circuit breaker may be open if too many failures
+  console.error("Call failed:", err.message);
+}
+```
+
+## Next Steps
+
+You now know the basics of structured concurrency with go-go-scope!
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="book" href="/concepts/structured-concurrency">
+    Deep dive into structured concurrency principles
+  </Card>
+  
+  <Card title="Channels" icon="arrows-left-right" href="/api/channel">
+    Learn about Go-style communication patterns
+  </Card>
+  
+  <Card title="Resilience" icon="shield" href="/guides/resilience">
+    Circuit breakers, retries, and fault tolerance
+  </Card>
+  
+  <Card title="Framework Integration" icon="plug" href="/frameworks/overview">
+    Use go-go-scope with your favorite framework
+  </Card>
+</CardGroup>

@@ -1,0 +1,174 @@
+---
+title: Introduction
+description: Structured concurrency for TypeScript with automatic cleanup and cancellation propagation
+---
+
+# Welcome to go-go-scope
+
+go-go-scope is a TypeScript library that brings **structured concurrency** to your applications using the Explicit Resource Management proposal. Write concurrent code that automatically cleans up after itself.
+
+```typescript
+// Structured concurrency with automatic cleanup
+await using s = scope({ timeout: 5000 });
+
+const [err, data] = await s.task(() => fetchUser(id));
+if (err) console.error("Failed:", err);
+else console.log("User:", data);
+// ✨ Everything cleaned up automatically
+```
+
+## Why go-go-scope?
+
+Traditional async/await code can leak resources when errors occur or operations timeout. go-go-scope ensures **deterministic cleanup** through structured concurrency patterns inspired by Go's goroutines and channels.
+
+<CardGroup cols={2}>
+  <Card title="Automatic Cleanup" icon="broom">
+    Resources disposed in LIFO order via `using`/`await using` syntax. No more forgotten cleanup code.
+  </Card>
+  
+  <Card title="Cancellation Propagation" icon="xmark">
+    Parent scope cancels all child tasks automatically. No fire-and-forget tasks.
+  </Card>
+  
+  <Card title="Resilience Built-in" icon="shield">
+    Circuit breakers, retries, timeouts, and idempotency patterns included out of the box.
+  </Card>
+  
+  <Card title="Worker Thread Support" icon="gears">
+    Offload CPU-intensive tasks to worker threads with the same clean API.
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Structured Concurrency
+
+All tasks are tracked and awaitable. Parent scopes control child task lifetimes:
+
+```typescript
+await using s = scope({ timeout: 3000 });
+
+// Both tasks cancelled if parent scope times out
+const task1 = s.task(() => fetchData());
+const task2 = s.task(() => processData());
+
+// Wait for both
+const [err1, data] = await task1;
+const [err2, result] = await task2;
+```
+
+### Go-style Channels
+
+Communicate between concurrent tasks using channels with backpressure:
+
+```typescript
+await using s = scope();
+
+const ch = s.channel<number>({ capacity: 10 });
+
+// Producer
+s.task(async () => {
+  for (let i = 0; i < 100; i++) {
+    await ch.send(i);
+  }
+  ch.close();
+});
+
+// Consumer
+for await (const value of ch) {
+  console.log("Received:", value);
+}
+```
+
+### Error Handling with Result Tuples
+
+No try/catch needed - errors are returned as values:
+
+```typescript
+const [err, user] = await s.task(() => fetchUser(id));
+
+if (err) {
+  // Handle error
+  return;
+}
+
+// TypeScript knows user is defined here
+console.log(user.name);
+```
+
+## Framework Integration
+
+go-go-scope integrates seamlessly with popular Node.js frameworks:
+
+<CardGroup cols={3}>
+  <Card title="Fastify" href="/frameworks/fastify">
+    Request-scoped concurrency for Fastify apps
+  </Card>
+  
+  <Card title="Express" href="/frameworks/express">
+    Middleware for Express.js applications
+  </Card>
+  
+  <Card title="NestJS" href="/frameworks/nestjs">
+    Native NestJS module with DI support
+  </Card>
+  
+  <Card title="Hono" href="/frameworks/hono">
+    Lightweight middleware for Hono
+  </Card>
+  
+  <Card title="Koa" href="/frameworks/koa">
+    Context-aware Koa middleware
+  </Card>
+  
+  <Card title="Hapi" href="/frameworks/hapi">
+    Plugin for Hapi.js servers
+  </Card>
+</CardGroup>
+
+## Persistence & Observability
+
+### Database Adapters
+
+Distributed locks, circuit breaker state, and caching for your database:
+
+- **Redis** - High-performance distributed locks
+- **PostgreSQL** - Advisory locks and table-based storage
+- **MySQL** - Named locks with table storage
+- **MongoDB** - Atomic operations with TTL indexes
+- **DynamoDB** - Conditional writes and single-table design
+- **SQLite** - Single-node deployments
+
+### Monitoring & Tracing
+
+- **OpenTelemetry** - Distributed tracing for all tasks
+- **Prometheus** - Metrics collection and export
+- **Profiling** - Built-in performance analysis
+- **Deadlock Detection** - Automatic detection of blocking cycles
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/getting-started/installation">
+    Install go-go-scope with your preferred package manager
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/getting-started/quickstart">
+    Build your first concurrent application in 5 minutes
+  </Card>
+  
+  <Card title="Core Concepts" icon="book" href="/concepts/structured-concurrency">
+    Learn the principles behind structured concurrency
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/scope">
+    Complete API documentation for all features
+  </Card>
+</CardGroup>
+
+## Community & Support
+
+- **GitHub**: [thelinuxlich/go-go-scope](https://github.com/thelinuxlich/go-go-scope)
+- **npm**: [go-go-scope](https://www.npmjs.com/package/go-go-scope)
+- **Issues**: [Report bugs](https://github.com/thelinuxlich/go-go-scope/issues)
+- **License**: MIT

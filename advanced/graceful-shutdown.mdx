@@ -1,0 +1,755 @@
+---
+title: "Graceful Shutdown"
+description: "Handle process termination gracefully with automatic cleanup and configurable shutdown strategies"
+---
+
+# Graceful Shutdown
+
+Graceful shutdown is critical for production applications. go-go-scope provides sophisticated shutdown handling that coordinates cleanup across all scopes, tasks, and resources when termination signals are received.
+
+## Overview
+
+The graceful shutdown system provides:
+
+- **Signal handling** - Automatic SIGTERM/SIGINT handling
+- **Shutdown strategies** - Multiple strategies for different scenarios
+- **Task coordination** - Track in-flight tasks and wait for completion
+- **Multi-scope coordination** - Manage dependencies between scopes
+- **Process lifecycle** - Complete application lifecycle management
+- **Rollback support** - Automatic rollback on shutdown failures
+
+## Basic Graceful Shutdown
+
+The `GracefulShutdownController` provides basic shutdown handling:
+
+<CodeGroup>
+```typescript Basic Usage
+import { scope, setupGracefulShutdown } from 'go-go-scope';
+
+await using s = scope();
+
+const shutdown = setupGracefulShutdown(s, {
+  signals: ['SIGTERM', 'SIGINT'],
+  timeout: 30000, // 30 seconds
+  onShutdown: async (signal) => {
+    console.log(`Received ${signal}, shutting down...`);
+  },
+  onComplete: () => {
+    console.log('Shutdown complete');
+  }
+});
+
+// Long-running task that checks for shutdown
+s.task(async ({ signal }) => {
+  while (!s.shutdownRequested) {
+    await processWork(signal);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+});
+
+// Wait for application
+await new Promise(() => {}); // Server running
+```
+
+```typescript HTTP Server Example
+import { scope, setupGracefulShutdown } from 'go-go-scope';
+import { createServer } from 'http';
+
+await using s = scope();
+
+const server = createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Hello World');
+});
+
+server.listen(3000);
+
+setupGracefulShutdown(s, {
+  timeout: 30000,
+  onShutdown: async () => {
+    console.log('Closing server...');
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+console.log('Server running on port 3000');
+```
+
+```typescript Database Connection
+import { scope, setupGracefulShutdown } from 'go-go-scope';
+import { createConnection } from 'some-db';
+
+await using s = scope();
+
+const db = await createConnection({
+  host: 'localhost',
+  database: 'myapp'
+});
+
+setupGracefulShutdown(s, {
+  timeout: 15000,
+  onShutdown: async () => {
+    // Finish pending queries
+    await db.waitForPendingQueries();
+  },
+  onComplete: async () => {
+    // Close connection
+    await db.close();
+  }
+});
+
+// Start processing
+s.task(async ({ signal }) => {
+  while (!signal.aborted) {
+    await processRecords(db, signal);
+  }
+});
+```
+</CodeGroup>
+
+## Shutdown Options
+
+### GracefulShutdownOptions
+
+```typescript
+interface GracefulShutdownOptions {
+  /** Signals to listen for (default: ['SIGTERM', 'SIGINT']) */
+  signals?: NodeJS.Signals[];
+  
+  /** Timeout in milliseconds before forceful exit (default: 30000) */
+  timeout?: number;
+  
+  /** Callback when shutdown is requested */
+  onShutdown?: (signal: NodeJS.Signals) => void | Promise<void>;
+  
+  /** Callback when shutdown is complete */
+  onComplete?: () => void | Promise<void>;
+  
+  /** Exit process after shutdown (default: true) */
+  exit?: boolean;
+  
+  /** Exit code on success (default: 0) */
+  successExitCode?: number;
+  
+  /** Exit code on timeout (default: 1) */
+  timeoutExitCode?: number;
+}
+```
+
+<Note>
+Set `exit: false` if you want to handle process exit yourself, useful for testing or custom exit logic.
+</Note>
+
+## Enhanced Shutdown Strategies
+
+The `EnhancedGracefulShutdownController` provides configurable shutdown strategies:
+
+### Available Strategies
+
+<Steps>
+  <Step title="Immediate">
+    Stop accepting new work and cancel all tasks immediately
+    
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      strategy: 'immediate',
+      timeout: 5000
+    });
+    ```
+  </Step>
+  
+  <Step title="Drain">
+    Wait for all in-flight tasks to complete before shutting down
+    
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      strategy: 'drain',
+      drainTimeout: 30000,
+      healthCheckInterval: 1000,
+      healthCheck: async () => {
+        return await checkDatabaseConnection();
+      }
+    });
+    ```
+  </Step>
+  
+  <Step title="Timeout">
+    Wait up to a timeout, then force shutdown
+    
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      strategy: 'timeout',
+      timeout: 45000
+    });
+    ```
+  </Step>
+  
+  <Step title="Hybrid (Default)">
+    Drain with timeout fallback - attempts graceful drain but enforces hard timeout
+    
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      strategy: 'hybrid',
+      drainTimeout: 30000,  // Warning threshold
+      timeout: 60000,        // Hard limit
+      healthCheckInterval: 1000
+    });
+    ```
+  </Step>
+</Steps>
+
+## Enhanced Shutdown Example
+
+<CodeGroup>
+```typescript Worker Service
+import { scope, setupEnhancedGracefulShutdown } from 'go-go-scope';
+
+await using s = scope();
+
+const controller = setupEnhancedGracefulShutdown(s, {
+  strategy: 'hybrid',
+  drainTimeout: 30000,
+  timeout: 60000,
+  healthCheckInterval: 1000,
+  
+  healthCheck: async () => {
+    // Check if we can still talk to dependencies
+    return await redis.ping() && await db.isAlive();
+  },
+  
+  beforeShutdown: async () => {
+    console.log('Preparing for shutdown...');
+    // Stop accepting new jobs
+    await jobQueue.pause();
+  },
+  
+  afterShutdown: async () => {
+    console.log('Cleanup complete');
+    // Final cleanup
+    await redis.disconnect();
+    await db.close();
+  },
+  
+  enableRollback: true,
+  rollback: async () => {
+    console.log('Shutdown failed, attempting rollback');
+    await jobQueue.resume();
+  }
+});
+
+// Process jobs
+s.task(async ({ signal }) => {
+  while (!controller.isShutdownRequested) {
+    const job = await jobQueue.next({ signal });
+    if (job) {
+      await processJob(job, signal);
+    }
+  }
+});
+
+console.log(`Active tasks: ${controller.activeTaskCount}`);
+console.log(`State: ${controller.currentState}`);
+```
+
+```typescript API Server
+import { scope, setupEnhancedGracefulShutdown } from 'go-go-scope';
+import express from 'express';
+
+await using s = scope();
+
+const app = express();
+let isShuttingDown = false;
+
+// Middleware to reject requests during shutdown
+app.use((req, res, next) => {
+  if (isShuttingDown) {
+    res.status(503).send('Service Unavailable');
+  } else {
+    next();
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('Hello World');
+});
+
+const server = app.listen(3000);
+
+const controller = setupEnhancedGracefulShutdown(s, {
+  strategy: 'drain',
+  drainTimeout: 30000,
+  
+  beforeShutdown: async () => {
+    isShuttingDown = true;
+    console.log('Stopping new connections...');
+    server.close();
+  },
+  
+  healthCheck: async () => {
+    // Check if all connections are closed
+    return new Promise(resolve => {
+      server.getConnections((err, count) => {
+        resolve(!err && count === 0);
+      });
+    });
+  },
+  
+  afterShutdown: async () => {
+    console.log('All connections closed');
+  }
+});
+
+console.log('Server running on port 3000');
+```
+
+```typescript Message Consumer
+import { scope, setupEnhancedGracefulShutdown } from 'go-go-scope';
+import { Kafka } from 'kafkajs';
+
+await using s = scope();
+
+const kafka = new Kafka({ brokers: ['localhost:9092'] });
+const consumer = kafka.consumer({ groupId: 'my-group' });
+
+await consumer.connect();
+await consumer.subscribe({ topic: 'my-topic' });
+
+const controller = setupEnhancedGracefulShutdown(s, {
+  strategy: 'drain',
+  drainTimeout: 45000,
+  timeout: 60000,
+  
+  beforeShutdown: async () => {
+    console.log('Pausing consumer...');
+    await consumer.pause([{ topic: 'my-topic' }]);
+  },
+  
+  afterShutdown: async () => {
+    console.log('Disconnecting consumer...');
+    await consumer.disconnect();
+  }
+});
+
+// Track message processing
+s.task(async ({ signal }) => {
+  await consumer.run({
+    eachMessage: async ({ topic, partition, message }) => {
+      const taskId = Symbol('message-task');
+      const tracker = controller.trackTask(taskId);
+      
+      try {
+        await processMessage(message, signal);
+      } finally {
+        tracker.complete();
+      }
+    }
+  });
+});
+
+console.log(`Active messages: ${controller.activeTaskCount}`);
+```
+</CodeGroup>
+
+## Task Tracking
+
+The enhanced controller automatically tracks tasks to coordinate shutdown:
+
+```typescript
+import { setupEnhancedGracefulShutdown } from 'go-go-scope';
+
+const controller = setupEnhancedGracefulShutdown(s, {
+  strategy: 'drain'
+});
+
+// Automatic task tracking
+s.task(async ({ signal }) => {
+  // This task is automatically tracked
+  await doWork(signal);
+});
+
+// Manual task tracking
+const taskId = Symbol('custom-task');
+const tracker = controller.trackTask(taskId);
+
+try {
+  await customAsyncWork();
+} finally {
+  tracker.complete();
+}
+
+// Check active tasks
+console.log(`Active tasks: ${controller.activeTaskCount}`);
+console.log(`Shutting down: ${controller.isShuttingDown}`);
+console.log(`State: ${controller.currentState}`);
+```
+
+<Warning>
+Always call `tracker.complete()` in a finally block to ensure tasks are properly untracked, even if they fail.
+</Warning>
+
+## Shutdown Hooks
+
+Register custom cleanup logic to run during shutdown:
+
+```typescript
+const controller = setupEnhancedGracefulShutdown(s);
+
+// Register hooks
+controller.onShutdownHook(async () => {
+  console.log('Flushing logs...');
+  await logger.flush();
+});
+
+controller.onShutdownHook(async () => {
+  console.log('Closing connections...');
+  await closeConnections();
+});
+
+controller.onShutdownHook(async () => {
+  console.log('Saving state...');
+  await saveCheckpoint();
+});
+```
+
+## Multi-Scope Coordination
+
+For complex applications with multiple scopes, use `ShutdownCoordinator`:
+
+<CodeGroup>
+```typescript Coordinator Setup
+import { 
+  scope, 
+  createShutdownCoordinator 
+} from 'go-go-scope';
+
+const coordinator = createShutdownCoordinator();
+
+// Create scopes
+const dbScope = scope();
+const apiScope = scope();
+const workerScope = scope();
+
+// Register with coordinator
+coordinator.register('database', dbScope, {
+  strategy: 'drain',
+  drainTimeout: 10000
+});
+
+coordinator.register('api', apiScope, {
+  strategy: 'drain',
+  drainTimeout: 30000
+});
+
+coordinator.register('worker', workerScope, {
+  strategy: 'hybrid',
+  drainTimeout: 45000,
+  timeout: 60000
+});
+
+// Define dependencies (worker depends on api and database)
+coordinator.addDependency('api', 'database');
+coordinator.addDependency('worker', 'api');
+coordinator.addDependency('worker', 'database');
+
+// Shutdown all in correct order
+process.on('SIGTERM', async () => {
+  console.log('Shutting down all services...');
+  const results = await coordinator.shutdownAll();
+  
+  for (const [name, error] of results) {
+    if (error) {
+      console.error(`${name} failed:`, error);
+    } else {
+      console.log(`${name} shut down successfully`);
+    }
+  }
+});
+```
+
+```typescript Status Monitoring
+const coordinator = createShutdownCoordinator();
+
+// ... register scopes ...
+
+// Monitor shutdown status
+setInterval(() => {
+  const status = coordinator.getStatus();
+  
+  for (const [name, info] of status) {
+    console.log(`${name}: state=${info.state}, active=${info.activeTasks}`);
+  }
+}, 1000);
+```
+
+```typescript Microservices Example
+import { 
+  scope,
+  createShutdownCoordinator 
+} from 'go-go-scope';
+
+const coordinator = createShutdownCoordinator();
+
+// Database scope (shutdown first)
+const dbScope = scope();
+coordinator.register('database', dbScope, {
+  strategy: 'immediate',
+  onShutdown: async () => {
+    await db.close();
+  }
+});
+
+// Cache scope (shutdown second)
+const cacheScope = scope();
+coordinator.register('cache', cacheScope, {
+  strategy: 'drain',
+  drainTimeout: 5000
+});
+
+// API scope (depends on cache and db)
+const apiScope = scope();
+coordinator.register('api', apiScope, {
+  strategy: 'drain',
+  drainTimeout: 30000,
+  onShutdown: async () => {
+    await server.close();
+  }
+});
+
+coordinator.addDependency('api', 'cache');
+coordinator.addDependency('api', 'database');
+coordinator.addDependency('cache', 'database');
+
+// Shutdown order will be: api -> cache -> database
+process.on('SIGTERM', async () => {
+  await coordinator.shutdownAll('SIGTERM');
+  process.exit(0);
+});
+```
+</CodeGroup>
+
+## Process Lifecycle Management
+
+The `ProcessLifecycle` class provides complete application lifecycle management:
+
+<CodeGroup>
+```typescript Single Scope Application
+import { scope, processLifecycle } from 'go-go-scope';
+
+const s = scope();
+
+// Initialize lifecycle
+const controller = processLifecycle.init(s, {
+  strategy: 'hybrid',
+  drainTimeout: 30000,
+  timeout: 60000,
+  onShutdown: async (signal) => {
+    console.log(`Shutdown triggered by ${signal}`);
+  }
+});
+
+// Start application
+s.task(async ({ signal }) => {
+  await runApplication(signal);
+});
+
+// The lifecycle handles uncaught exceptions
+// and triggers graceful shutdown automatically
+```
+
+```typescript Multi-Scope Application
+import { scope, processLifecycle } from 'go-go-scope';
+
+// Initialize with coordinator
+const coordinator = processLifecycle.initWithCoordinator();
+
+// Register scopes
+const dbScope = scope();
+coordinator.register('database', dbScope);
+
+const apiScope = scope();
+coordinator.register('api', apiScope);
+
+coordinator.addDependency('api', 'database');
+
+// The lifecycle handles all error cases
+// and coordinates shutdown across scopes
+```
+
+```typescript Check Initialization
+import { processLifecycle } from 'go-go-scope';
+
+if (processLifecycle.initialized) {
+  const controller = processLifecycle.getController();
+  console.log(`State: ${controller.currentState}`);
+  console.log(`Active tasks: ${controller.activeTaskCount}`);
+}
+```
+</CodeGroup>
+
+## Shutdown States
+
+The enhanced controller tracks shutdown progress through states:
+
+```typescript
+type ShutdownState = 
+  | 'running'        // Normal operation
+  | 'shutting-down'  // Shutdown initiated
+  | 'draining'       // Waiting for tasks to complete
+  | 'cleaning-up'    // Running cleanup hooks
+  | 'complete'       // Shutdown finished successfully
+  | 'failed';        // Shutdown encountered errors
+
+const controller = setupEnhancedGracefulShutdown(s);
+
+console.log(controller.currentState); // 'running'
+
+// Later during shutdown
+console.log(controller.currentState); // 'draining'
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Choose the Right Strategy">
+    - **Immediate**: Testing, development, or when tasks are idempotent
+    - **Drain**: Production APIs, message consumers
+    - **Timeout**: When you need a hard deadline
+    - **Hybrid**: Most production workloads (default)
+  </Step>
+  
+  <Step title="Set Appropriate Timeouts">
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      strategy: 'hybrid',
+      drainTimeout: 30000,  // Warn after 30s
+      timeout: 60000,        // Force after 60s
+    });
+    ```
+    
+    Balance graceful completion with preventing indefinite hangs.
+  </Step>
+  
+  <Step title="Use Health Checks">
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      healthCheckInterval: 1000,
+      healthCheck: async () => {
+        // Check critical dependencies
+        return await db.ping() && await cache.ping();
+      }
+    });
+    ```
+    
+    Monitor system health during shutdown.
+  </Step>
+  
+  <Step title="Handle Dependencies">
+    Use `ShutdownCoordinator` for multi-scope applications to ensure proper shutdown order.
+  </Step>
+  
+  <Step title="Enable Rollback for Critical Systems">
+    ```typescript
+    setupEnhancedGracefulShutdown(s, {
+      enableRollback: true,
+      rollback: async () => {
+        // Undo partial shutdown
+        await restoreState();
+      }
+    });
+    ```
+  </Step>
+  
+  <Step title="Test Shutdown Behavior">
+    ```typescript
+    // In tests, disable process exit
+    setupGracefulShutdown(s, {
+      exit: false,
+      onComplete: () => {
+        // Assert cleanup occurred
+      }
+    });
+    
+    await controller.shutdown('SIGTERM');
+    ```
+  </Step>
+</Steps>
+
+## Error Handling
+
+```typescript
+const controller = setupEnhancedGracefulShutdown(s, {
+  strategy: 'drain',
+  timeout: 30000,
+  
+  onShutdown: async (signal) => {
+    try {
+      await criticalCleanup();
+    } catch (error) {
+      console.error('Cleanup failed:', error);
+      // Error is logged but shutdown continues
+    }
+  },
+  
+  enableRollback: true,
+  rollback: async () => {
+    console.log('Attempting to restore state');
+    try {
+      await restoreFromBackup();
+    } catch (error) {
+      console.error('Rollback failed:', error);
+      // Rollback is best-effort
+    }
+  }
+});
+```
+
+<Note>
+Errors in shutdown hooks are caught and logged, allowing other hooks to run. Rollback is best-effort and errors are logged but don't prevent process exit.
+</Note>
+
+## Kubernetes Integration
+
+When deploying to Kubernetes, graceful shutdown ensures clean pod termination:
+
+```typescript
+import { scope, setupEnhancedGracefulShutdown } from 'go-go-scope';
+
+await using s = scope();
+
+setupEnhancedGracefulShutdown(s, {
+  // Kubernetes sends SIGTERM with 30s grace period by default
+  signals: ['SIGTERM'],
+  strategy: 'hybrid',
+  drainTimeout: 20000,  // Start warning at 20s
+  timeout: 25000,        // Force shutdown at 25s (before k8s kills)
+  
+  beforeShutdown: async () => {
+    // Remove from service endpoint
+    // (Kubernetes does this automatically, but you might
+    // want to signal load balancers or service mesh)
+    await notifyServiceMesh();
+    
+    // Give load balancers time to notice
+    await new Promise(r => setTimeout(r, 2000));
+  },
+  
+  healthCheck: async () => {
+    // Check if requests are still coming
+    return activeRequests === 0;
+  },
+  
+  afterShutdown: async () => {
+    // Save final state
+    await saveCheckpoint();
+    await logger.flush();
+  }
+});
+
+console.log('Application started');
+```
+
+## Related Resources
+
+- [Task Management](/core/tasks) - Understanding task lifecycle
+- [Error Handling](/core/error-handling) - Error propagation and recovery
+- [Health Checks](/advanced/health-checks) - Monitoring application health

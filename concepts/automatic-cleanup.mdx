@@ -1,0 +1,523 @@
+---
+title: Automatic Cleanup
+description: Understanding disposal patterns, LIFO cleanup, and resource management in go-go-scope
+---
+
+## The `using` and `await using` Pattern
+
+go-go-scope leverages TypeScript's **Explicit Resource Management** proposal (ES2022) to provide automatic cleanup using the `using` and `await using` keywords.
+
+### Synchronous Disposal: `using`
+
+For synchronous cleanup, use the `using` keyword:
+
+```typescript
+import { Task } from 'go-go-scope';
+
+// Task implements Disposable
+function processData() {
+  using task = scope().task(async () => {
+    return await fetchData();
+  });
+  
+  // Task is NOT started yet (lazy execution)
+  
+  // When this block exits, task[Symbol.dispose]() is automatically called
+}
+```
+
+### Asynchronous Disposal: `await using`
+
+For asynchronous cleanup (most common with scopes), use `await using`:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+// ✅ Recommended pattern
+async function handleRequest() {
+  await using s = scope();
+  
+  const task = s.task(async ({ signal }) => {
+    return await fetch('/api/data', { signal });
+  });
+  
+  const [err, data] = await task;
+  
+  // When this block exits, s[Symbol.asyncDispose]() is called
+  // This cancels all tasks and cleans up all resources
+}
+```
+
+<Note>
+The `await using` keyword ensures that cleanup happens **even if an exception is thrown**, similar to a `try...finally` block.
+</Note>
+
+## Symbol.asyncDispose Implementation
+
+The `Scope` class implements `Symbol.asyncDispose` for automatic cleanup:
+
+**Source location:** `/home/daytona/workspace/source/packages/go-go-scope/src/scope.ts:1830-1917`
+
+```typescript
+class Scope implements AsyncDisposable {
+  async [Symbol.asyncDispose](): Promise<void> {
+    // 1. Mark as disposed
+    this.disposed = true;
+    
+    // 2. Abort all tasks
+    this.abortController.abort(new Error('Scope disposed'));
+    
+    // 3. Wait for active tasks to settle
+    await Promise.allSettled(this.activeTasks);
+    
+    // 4. Dispose resources in LIFO order (reverse of creation)
+    for (let i = this.disposables.length - 1; i >= 0; i--) {
+      const disposable = this.disposables[i];
+      if (Symbol.asyncDispose in disposable) {
+        await disposable[Symbol.asyncDispose]();
+      } else if (Symbol.dispose in disposable) {
+        disposable[Symbol.dispose]();
+      }
+    }
+    
+    // 5. Dispose child scopes in LIFO order
+    for (let i = this.childScopes.length - 1; i >= 0; i--) {
+      await this.childScopes[i][Symbol.asyncDispose]();
+    }
+  }
+}
+```
+
+## LIFO Cleanup Order
+
+Resources are disposed in **Last-In-First-Out (LIFO)** order - the reverse of their creation order. This ensures dependencies are cleaned up correctly.
+
+### Example: LIFO Disposal
+
+```typescript
+await using s = scope();
+
+// Resources created in order: A, B, C
+s.onDispose(() => console.log('Cleanup A'));
+s.onDispose(() => console.log('Cleanup B'));
+s.onDispose(() => console.log('Cleanup C'));
+
+// When scope exits, disposal happens in reverse order:
+// Cleanup C
+// Cleanup B
+// Cleanup A
+```
+
+**Visual representation:**
+
+```
+Creation Order:  A → B → C
+Disposal Order:  C → B → A  (LIFO)
+```
+
+### Why LIFO?
+
+LIFO disposal ensures that dependent resources are cleaned up before their dependencies:
+
+```typescript
+await using s = scope();
+
+// 1. Create database connection
+const db = await connectToDatabase();
+s.onDispose(() => db.close());
+
+// 2. Create cache that depends on database
+const cache = await createCache(db);
+s.onDispose(() => cache.flush());
+
+// 3. Create API client that depends on cache
+const api = await createApiClient(cache);
+s.onDispose(() => api.shutdown());
+
+// Disposal order (LIFO):
+// 1. api.shutdown()   (client closed first)
+// 2. cache.flush()    (cache flushed second)
+// 3. db.close()       (database closed last)
+```
+
+<Warning>
+If disposal happened in FIFO order, the database might close before the cache, causing errors when the cache tries to flush to the closed database.
+</Warning>
+
+## Resource Registration
+
+go-go-scope provides multiple ways to register resources for cleanup:
+
+### 1. onDispose Hook
+
+Register cleanup callbacks:
+
+```typescript
+await using s = scope();
+
+// Register async cleanup
+s.onDispose(async () => {
+  await cleanupExpensiveResource();
+});
+
+// Register sync cleanup
+s.onDispose(() => {
+  console.log('Scope disposed');
+});
+```
+
+### 2. registerDisposable
+
+Register any object implementing `Disposable` or `AsyncDisposable`:
+
+```typescript
+await using s = scope();
+
+const channel = new Channel();
+s.registerDisposable(channel); // Automatically disposed with scope
+
+const semaphore = new Semaphore(5);
+s.registerDisposable(semaphore); // Automatically disposed with scope
+```
+
+### 3. Service Disposal
+
+Provide cleanup functions when registering services:
+
+```typescript
+await using s = scope();
+
+const db = await createDatabase();
+
+// Provide service with disposal function
+s.provide('database', db, async (db) => {
+  console.log('Closing database...');
+  await db.close();
+});
+
+// When scope is disposed, database is automatically closed
+```
+
+### 4. Built-in Resource Management
+
+Many go-go-scope primitives auto-register for cleanup:
+
+```typescript
+await using s = scope();
+
+// These are automatically cleaned up when scope exits:
+const ch = s.channel();           // Channel closed
+const bc = s.broadcast();         // Broadcast channel closed  
+const sem = s.semaphore(5);       // Semaphore released
+const pool = s.pool({ ... });     // Pool drained and closed
+```
+
+## Cleanup Guarantees
+
+go-go-scope provides strong cleanup guarantees:
+
+### 1. Exception Safety
+
+Cleanup happens even when exceptions occur:
+
+```typescript
+await using s = scope();
+
+s.onDispose(() => console.log('Cleanup always runs'));
+
+throw new Error('Something went wrong');
+
+// Output: "Cleanup always runs"
+// Cleanup executes before error propagates
+```
+
+### 2. Early Return
+
+Cleanup happens on early returns:
+
+```typescript
+async function processRequest(urgent: boolean) {
+  await using s = scope();
+  
+  s.onDispose(() => console.log('Cleanup'));
+  
+  if (urgent) {
+    return 'fast path'; // Cleanup runs here
+  }
+  
+  await slowOperation();
+  return 'slow path'; // Cleanup also runs here
+}
+```
+
+### 3. Cancellation Propagation
+
+All tasks are cancelled before cleanup:
+
+```typescript
+await using s = scope();
+
+const task = s.task(async ({ signal }) => {
+  signal.addEventListener('abort', () => {
+    console.log('Task cancelled');
+  });
+  
+  await infiniteLoop();
+});
+
+// When scope exits:
+// 1. All tasks receive abort signal ("Task cancelled")
+// 2. Scope waits for tasks to settle
+// 3. Resources are disposed in LIFO order
+```
+
+## Real-World Examples
+
+### Example 1: Database Transaction
+
+```typescript
+import { scope } from 'go-go-scope';
+
+async function transferMoney(from: string, to: string, amount: number) {
+  await using s = scope();
+  
+  // Begin transaction
+  const tx = await db.beginTransaction();
+  
+  // Register rollback on scope exit (unless committed)
+  let committed = false;
+  s.onDispose(async () => {
+    if (!committed) {
+      await tx.rollback();
+      console.log('Transaction rolled back');
+    }
+  });
+  
+  try {
+    // Perform operations
+    await tx.query('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, from]);
+    await tx.query('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, to]);
+    
+    // Commit transaction
+    await tx.commit();
+    committed = true;
+    
+    return { success: true };
+  } catch (error) {
+    // On error, scope disposal will trigger rollback
+    throw error;
+  }
+  
+  // ✅ Transaction automatically rolled back if any error occurs
+  // ✅ Transaction automatically rolled back if scope times out
+}
+```
+
+### Example 2: File Processing with Cleanup
+
+```typescript
+import { scope } from 'go-go-scope';
+import * as fs from 'fs/promises';
+
+async function processFile(filePath: string) {
+  await using s = scope({ timeout: 30000 }); // 30 second timeout
+  
+  // Open file
+  const fileHandle = await fs.open(filePath, 'r');
+  
+  // Register cleanup
+  s.onDispose(async () => {
+    await fileHandle.close();
+    console.log('File closed');
+  });
+  
+  // Create temporary file
+  const tempFile = await fs.open('/tmp/processing.tmp', 'w');
+  s.onDispose(async () => {
+    await tempFile.close();
+    await fs.unlink('/tmp/processing.tmp'); // Delete temp file
+    console.log('Temp file deleted');
+  });
+  
+  // Process file in chunks
+  const task = s.task(async ({ signal }) => {
+    const buffer = Buffer.alloc(4096);
+    let bytesRead = 0;
+    
+    while (!signal.aborted) {
+      const { bytesRead: read } = await fileHandle.read(buffer, 0, 4096);
+      if (read === 0) break;
+      
+      await tempFile.write(buffer.slice(0, read));
+      bytesRead += read;
+    }
+    
+    return bytesRead;
+  });
+  
+  const [err, bytesProcessed] = await task;
+  
+  if (err) {
+    throw new Error(`Failed to process file: ${err.message}`);
+  }
+  
+  return bytesProcessed;
+  
+  // Disposal order (LIFO):
+  // 1. Close and delete temp file
+  // 2. Close source file
+}
+```
+
+### Example 3: HTTP Server with Graceful Shutdown
+
+```typescript
+import { scope } from 'go-go-scope';
+import { createServer } from 'http';
+
+async function startServer() {
+  await using s = scope({ name: 'http-server' });
+  
+  const server = createServer((req, res) => {
+    res.end('Hello World');
+  });
+  
+  // Start server
+  await new Promise<void>((resolve) => {
+    server.listen(3000, () => {
+      console.log('Server started on port 3000');
+      resolve();
+    });
+  });
+  
+  // Register graceful shutdown
+  s.onDispose(async () => {
+    console.log('Shutting down server...');
+    
+    // Stop accepting new connections
+    server.close();
+    
+    // Wait for existing connections to close (with timeout)
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        console.log('Force closing remaining connections');
+        resolve();
+      }, 5000);
+      
+      server.close(() => {
+        clearTimeout(timeout);
+        console.log('Server closed gracefully');
+        resolve();
+      });
+    });
+  });
+  
+  // Keep server running
+  await new Promise(() => {}); // Wait indefinitely
+  
+  // When process receives SIGTERM/SIGINT:
+  // 1. Scope disposal triggered
+  // 2. Server stops accepting connections
+  // 3. Existing connections are allowed to finish (with timeout)
+  // 4. Server closed gracefully
+}
+```
+
+## Common Patterns
+
+<CodeGroup>
+```typescript Cleanup with Error Handling
+await using s = scope();
+
+s.onDispose(async () => {
+  try {
+    await riskyCleanup();
+  } catch (err) {
+    console.error('Cleanup failed:', err);
+    // Error is logged but doesn't prevent other cleanups
+  }
+});
+```
+
+```typescript Conditional Cleanup
+await using s = scope();
+
+let resourceAcquired = false;
+
+s.onDispose(async () => {
+  if (resourceAcquired) {
+    await releaseResource();
+  }
+});
+
+resourceAcquired = await acquireResource();
+```
+
+```typescript Nested Scopes
+await using parent = scope();
+
+parent.onDispose(() => console.log('Parent cleanup'));
+
+{
+  const child = parent.createChild();
+  child.onDispose(() => console.log('Child cleanup'));
+  
+  await child[Symbol.asyncDispose]();
+  // Output: "Child cleanup"
+}
+
+await parent[Symbol.asyncDispose]();
+// Output: "Parent cleanup"
+```
+</CodeGroup>
+
+<Tip>
+Use nested scopes to group related resources and control their lifetime independently.
+</Tip>
+
+## Disposal Hooks
+
+Listen to disposal events for debugging or monitoring:
+
+```typescript
+await using s = scope({
+  hooks: {
+    onDispose: (index: number, error?: unknown) => {
+      if (error) {
+        console.error(`Resource ${index} disposal failed:`, error);
+      } else {
+        console.log(`Resource ${index} disposed successfully`);
+      }
+    }
+  }
+});
+
+s.provide('db', createDatabase(), async (db) => {
+  await db.close();
+});
+
+s.provide('cache', createCache(), async (cache) => {
+  await cache.flush();
+});
+
+// When scope exits:
+// Resource 2 disposed successfully (cache)
+// Resource 1 disposed successfully (db)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Cancellation" icon="stop" href="/concepts/cancellation">
+    Learn about cancellation propagation with AbortSignal
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Handle errors gracefully with Result tuples
+  </Card>
+  <Card title="Service Injection" icon="syringe" href="/guides/dependency-injection">
+    Share resources across tasks with DI
+  </Card>
+  <Card title="Lifecycle Hooks" icon="webhook" href="/guides/hooks">
+    Monitor scope and task lifecycle events
+  </Card>
+</CardGroup>

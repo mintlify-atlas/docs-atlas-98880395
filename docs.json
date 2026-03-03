@@ -1,122 +1,139 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "go-go-scope",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#FF6B35",
+    "light": "#FFB997",
+    "dark": "#CC5529"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/thelinuxlich/go-go-scope"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/thelinuxlich/go-go-scope"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Getting Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/structured-concurrency",
+              "concepts/scopes-and-tasks",
+              "concepts/automatic-cleanup",
+              "concepts/cancellation"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Guides",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "guides/basic-usage",
+              "guides/channels",
+              "guides/parallel-execution",
+              "guides/resilience-patterns",
+              "guides/streams",
+              "guides/scheduler"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Advanced",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "advanced/dependency-injection",
+              "advanced/distributed-locks",
+              "advanced/graceful-shutdown",
+              "advanced/metrics-and-tracing",
+              "advanced/worker-threads"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Core API",
             "pages": [
-              "api-reference/introduction"
+              "api/scope",
+              "api/task",
+              "api/channel",
+              "api/semaphore",
+              "api/circuit-breaker",
+              "api/resource-pool"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Packages",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/stream",
+              "api/scheduler",
+              "api/testing"
+            ]
+          },
+          {
+            "group": "Persistence Adapters",
+            "pages": [
+              "api/persistence/redis",
+              "api/persistence/postgres",
+              "api/persistence/mysql",
+              "api/persistence/mongodb",
+              "api/persistence/dynamodb",
+              "api/persistence/sqlite"
+            ]
+          },
+          {
+            "group": "Framework Adapters",
+            "pages": [
+              "api/adapters/fastify",
+              "api/adapters/express",
+              "api/adapters/nestjs",
+              "api/adapters/hono",
+              "api/adapters/elysia",
+              "api/adapters/koa",
+              "api/adapters/hapi"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Common Patterns",
+            "pages": [
+              "examples/health-checks",
+              "examples/actor-model",
+              "examples/pipeline-processing",
+              "examples/rate-limiting",
+              "examples/retry-strategies"
+            ]
+          },
+          {
+            "group": "Integration Examples",
+            "pages": [
+              "examples/web-api",
+              "examples/background-jobs",
+              "examples/microservices",
+              "examples/distributed-systems"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

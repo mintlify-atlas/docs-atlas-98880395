@@ -1,0 +1,408 @@
+---
+title: "Parallel Execution"
+description: "Run multiple tasks concurrently with parallel() and race() functions"
+---
+
+## Overview
+
+go-go-scope provides two main functions for concurrent execution:
+
+- **`parallel()`** - Run all tasks to completion, collecting all results
+- **`race()`** - Run tasks competitively, return the first to complete (cancels losers)
+
+Both functions support concurrency limits, progress tracking, and structured cancellation.
+
+## Parallel Execution
+
+Run multiple tasks concurrently and collect all results:
+
+```typescript
+import { parallel } from 'go-go-scope';
+
+// Run tasks in parallel
+const results = await parallel([
+  async (signal) => fetch('https://api.example.com/users', { signal }),
+  async (signal) => fetch('https://api.example.com/posts', { signal }),
+  async (signal) => fetch('https://api.example.com/comments', { signal }),
+]);
+
+// results is a tuple of Result types
+const [usersResult, postsResult, commentsResult] = results;
+
+const [usersErr, users] = usersResult;
+if (usersErr) {
+  console.error('Failed to fetch users:', usersErr);
+}
+```
+
+<Note>
+Each result is a tuple `[error, value]`. Check for errors individually per task.
+</Note>
+
+### Type-Safe Results
+
+parallel() preserves individual return types:
+
+```typescript
+const [userResult, orderResult] = await parallel([
+  async (signal) => fetchUser(1, { signal }),      // Returns User
+  async (signal) => fetchOrders({ signal }),       // Returns Order[]
+]);
+
+const [userErr, user] = userResult;       // user: User | undefined
+const [orderErr, orders] = orderResult;   // orders: Order[] | undefined
+```
+
+## Concurrency Limits
+
+Limit how many tasks run simultaneously:
+
+```typescript
+import { parallel } from 'go-go-scope';
+
+// Process 100 items, but only 5 at a time
+const items = Array.from({ length: 100 }, (_, i) => i);
+
+const results = await parallel(
+  items.map(item => async (signal) => processItem(item, signal)),
+  { 
+    concurrency: 5  // Only 5 tasks run concurrently
+  }
+);
+```
+
+<Tip>
+Use concurrency limits to avoid overwhelming APIs or system resources.
+</Tip>
+
+## Progress Tracking
+
+Monitor progress as tasks complete:
+
+```typescript
+const results = await parallel(
+  tasks,
+  {
+    onProgress: (completed, total, result) => {
+      const [err] = result;
+      console.log(
+        `Progress: ${completed}/${total} ${err ? '❌' : '✅'}`
+      );
+    }
+  }
+);
+```
+
+## Error Handling
+
+### Fail Fast (Default)
+
+By default, parallel() stops all tasks on first error:
+
+```typescript
+const results = await parallel([
+  async () => fetch('/api/users'),
+  async () => { throw new Error('Failed!'); },
+  async () => fetch('/api/posts'),
+]);
+
+// Second task fails, all tasks are cancelled
+// results[0] = [CancelledError, undefined]
+// results[1] = [Error('Failed!'), undefined]
+// results[2] = [CancelledError, undefined]
+```
+
+### Continue on Error
+
+Run all tasks regardless of failures:
+
+```typescript
+const results = await parallel(
+  tasks,
+  { 
+    continueOnError: true  // Don't cancel on first error
+  }
+);
+
+// All tasks complete, collect errors individually
+for (const [err, value] of results) {
+  if (err) {
+    console.error('Task failed:', err);
+  } else {
+    console.log('Task succeeded:', value);
+  }
+}
+```
+
+## Scope-Based Parallel
+
+Run parallel tasks within a scope for automatic cleanup:
+
+```typescript
+await using s = scope({ timeout: 10000 });
+
+const results = await s.parallel([
+  async ({ signal }) => fetch('/api/users', { signal }),
+  async ({ signal }) => fetch('/api/posts', { signal }),
+  async ({ signal }) => fetch('/api/comments', { signal }),
+]);
+
+// All tasks are cancelled if scope times out or is disposed
+```
+
+## Race Execution
+
+Run tasks competitively - first to complete wins, others are cancelled:
+
+```typescript
+import { race } from 'go-go-scope';
+
+const [err, fastest] = await race([
+  async (signal) => fetch('https://api-1.example.com', { signal }),
+  async (signal) => fetch('https://api-2.example.com', { signal }),
+  async (signal) => fetch('https://api-3.example.com', { signal }),
+]);
+
+if (err) {
+  console.error('All APIs failed');
+} else {
+  console.log('Fastest API returned:', fastest);
+}
+```
+
+### Race with Timeout
+
+```typescript
+const [err, result] = await race(
+  [
+    async (signal) => fetch('https://slow-api.com', { signal }),
+    async (signal) => fetch('https://fast-api.com', { signal }),
+  ],
+  { 
+    timeout: 5000  // Abort all if none complete in 5s
+  }
+);
+```
+
+### Require Success
+
+Continue racing until one succeeds:
+
+```typescript
+const [err, result] = await race(
+  [
+    async () => unreliableAPI1(),  // Might fail
+    async () => unreliableAPI2(),  // Might fail
+    async () => unreliableAPI3(),  // Might fail
+  ],
+  { 
+    requireSuccess: true  // Keep racing until one succeeds
+  }
+);
+
+// Returns first successful result, or error if all fail
+```
+
+## Staggered Start (Hedging)
+
+Start tasks with delays (hedging pattern for tail latency):
+
+```typescript
+const [err, result] = await race(
+  [
+    async (signal) => primaryAPI(signal),
+    async (signal) => backupAPI(signal),
+  ],
+  {
+    staggerDelay: 100,        // Wait 100ms before starting backup
+    staggerMaxConcurrent: 1,  // Start one at a time
+  }
+);
+
+// Tries primary API first
+// If it takes >100ms, also starts backup API
+// Returns whichever completes first
+```
+
+## Worker Pool
+
+Run CPU-intensive tasks in worker threads:
+
+```typescript
+const results = await parallel(
+  [
+    async () => computeHash(data1),
+    async () => computeHash(data2),
+    async () => computeHash(data3),
+  ],
+  {
+    workers: {
+      threads: 4,          // Number of worker threads
+      idleTimeout: 60000,  // Terminate idle workers after 60s
+    }
+  }
+);
+```
+
+<Warning>
+Worker pool serializes functions to threads - avoid closures and use only serializable data.
+</Warning>
+
+## Common Patterns
+
+### Batch Processing
+
+```typescript
+async function processBatch<T, R>(
+  items: T[],
+  processor: (item: T) => Promise<R>,
+  batchSize: number = 10
+): Promise<Result<unknown, R>[]> {
+  return parallel(
+    items.map(item => async (signal) => {
+      return processor(item);
+    }),
+    { concurrency: batchSize }
+  );
+}
+
+// Process 1000 items, 10 at a time
+const results = await processBatch(items, processItem, 10);
+```
+
+### API Fan-Out
+
+```typescript
+async function fetchUserProfile(userId: string) {
+  await using s = scope({ timeout: 5000 });
+  
+  const [profileRes, postsRes, friendsRes] = await s.parallel([
+    async ({ signal }) => fetchProfile(userId, { signal }),
+    async ({ signal }) => fetchPosts(userId, { signal }),
+    async ({ signal }) => fetchFriends(userId, { signal }),
+  ]);
+  
+  const [profileErr, profile] = profileRes;
+  const [postsErr, posts] = postsRes;
+  const [friendsErr, friends] = friendsRes;
+  
+  return {
+    profile: profileErr ? null : profile,
+    posts: postsErr ? [] : posts,
+    friends: friendsErr ? [] : friends,
+  };
+}
+```
+
+### Parallel with Retries
+
+```typescript
+import { exponentialBackoff } from 'go-go-scope';
+
+await using s = scope();
+
+const results = await s.parallel(
+  tasks.map(task => async ({ signal }) => task(signal)),
+  {
+    concurrency: 5,
+    continueOnError: true
+  }
+);
+
+// Retry failed tasks
+const failedIndices = results
+  .map((result, i) => result[0] ? i : -1)
+  .filter(i => i !== -1);
+
+for (const i of failedIndices) {
+  const [err, value] = await s.task(
+    tasks[i],
+    { 
+      retry: {
+        maxRetries: 3,
+        delay: exponentialBackoff({ initial: 100 })
+      }
+    }
+  );
+  
+  if (!err) {
+    results[i] = [undefined, value];
+  }
+}
+```
+
+### Race for Fastest API
+
+```typescript
+const mirrors = [
+  'https://mirror1.example.com/data.json',
+  'https://mirror2.example.com/data.json',
+  'https://mirror3.example.com/data.json',
+];
+
+const [err, data] = await race(
+  mirrors.map(url => async (signal) => {
+    const res = await fetch(url, { signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }),
+  { 
+    timeout: 10000,
+    requireSuccess: true  // Try all until one succeeds
+  }
+);
+```
+
+### Competitive Health Checks
+
+```typescript
+async function isServiceHealthy(): Promise<boolean> {
+  const endpoints = [
+    'https://api.example.com/health',
+    'https://db.example.com/health',
+    'https://cache.example.com/health',
+  ];
+  
+  const [err] = await race(
+    endpoints.map(url => async (signal) => {
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error('Unhealthy');
+      return true;
+    }),
+    { 
+      timeout: 3000,
+      requireSuccess: false  // Any endpoint responding is good enough
+    }
+  );
+  
+  return err === undefined;
+}
+```
+
+## Performance Tips
+
+<CardGroup cols={2}>
+  <Card title="Use Concurrency Limits" icon="gauge">
+    Limit concurrent tasks to avoid overwhelming resources
+  </Card>
+  <Card title="Continue on Error" icon="circle-xmark">
+    Use `continueOnError: true` to collect all results
+  </Card>
+  <Card title="Worker Threads" icon="microchip">
+    Use worker pool for CPU-intensive operations
+  </Card>
+  <Card title="Progress Callbacks" icon="chart-line">
+    Monitor long-running parallel operations
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Resilience Patterns" icon="shield" href="/guides/resilience-patterns">
+    Add circuit breakers and retries to parallel tasks
+  </Card>
+  <Card title="Streams" icon="water" href="/guides/streams">
+    Process data streams with lazy operations
+  </Card>
+</CardGroup>

@@ -1,0 +1,407 @@
+---
+title: 'MongoDB Adapter'
+description: 'MongoDB persistence adapter for distributed locks, circuit breaker state, and caching'
+---
+
+## Overview
+
+The MongoDB persistence adapter provides distributed locks, circuit breaker state management, caching, and checkpoint support using MongoDB as the backend. It leverages MongoDB's native TTL indexes for automatic expiration and unique indexes for lock acquisition.
+
+## Installation
+
+```bash
+npm install @go-go-scope/persistence-mongodb mongodb
+```
+
+## Features
+
+- **Distributed Locks**: TTL-based locks with automatic expiration via MongoDB TTL indexes
+- **Circuit Breaker State**: Persistent failure tracking with document storage
+- **Caching**: High-performance cache with native TTL support
+- **Checkpoints**: Full checkpoint support for task recovery
+- **Idempotency**: Prevent duplicate operations (via `MongoDBIdempotencyAdapter`)
+- **Auto Indexing**: Automatic index creation on connect
+- **No Manual Cleanup**: MongoDB TTL indexes handle expiration automatically
+
+## Basic Usage
+
+<CodeGroup>
+
+```typescript Basic Setup
+import { MongoClient } from 'mongodb'
+import { MongoDBAdapter } from '@go-go-scope/persistence-mongodb'
+import { scope } from 'go-go-scope'
+
+const client = new MongoClient(process.env.MONGODB_URL)
+await client.connect()
+
+const db = client.db('myapp')
+const persistence = new MongoDBAdapter(db, { keyPrefix: 'myapp:' })
+
+// Initialize indexes
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+```typescript With Lock
+import { MongoClient } from 'mongodb'
+import { MongoDBAdapter } from '@go-go-scope/persistence-mongodb'
+import { scope } from 'go-go-scope'
+
+const client = new MongoClient(process.env.MONGODB_URL)
+await client.connect()
+
+const db = client.db('myapp')
+const persistence = new MongoDBAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+
+// Acquire a distributed lock with 30 second TTL
+const lock = await s.acquireLock('resource:123', 30000)
+if (!lock) {
+  throw new Error('Could not acquire lock')
+}
+
+try {
+  // Do work with exclusive access
+  await processResource()
+} finally {
+  await lock.release()
+}
+```
+
+```typescript With Caching
+import { MongoClient } from 'mongodb'
+import { MongoDBAdapter } from '@go-go-scope/persistence-mongodb'
+import { scope } from 'go-go-scope'
+
+const client = new MongoClient(process.env.MONGODB_URL)
+await client.connect()
+
+const db = client.db('myapp')
+const persistence = new MongoDBAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ cache: persistence })
+
+// Cache with 5 minute TTL
+await s.cache.set('user:123', { name: 'Alice', role: 'admin' }, 300000)
+
+const user = await s.cache.get('user:123')
+console.log(user) // { name: 'Alice', role: 'admin' }
+```
+
+</CodeGroup>
+
+## Configuration
+
+<ParamField path="db" type="Db" required>
+  MongoDB database instance
+</ParamField>
+
+<ParamField path="options" type="PersistenceAdapterOptions">
+  Configuration options
+  
+  <Expandable title="properties">
+    <ParamField path="keyPrefix" type="string">
+      Prefix for all document keys (e.g., `'myapp:'`). Useful for namespace isolation.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Collections and Indexes
+
+The adapter automatically creates the following collections and indexes on `connect()`:
+
+### go_goscope_locks
+
+- **Unique Index**: `{ key: 1 }`
+- **TTL Index**: `{ expiresAt: 1 }` with `expireAfterSeconds: 0`
+
+### go_goscope_circuit
+
+- **Unique Index**: `{ key: 1 }`
+
+### go_goscope_cache
+
+- **Unique Index**: `{ key: 1 }`
+- **TTL Index**: `{ expiresAt: 1 }` with `expireAfterSeconds: 0`
+
+### go_goscope_checkpoints
+
+- **Unique Index**: `{ taskId: 1, sequence: 1 }`
+- **Index**: `{ taskId: 1 }`
+
+## Lock Provider Methods
+
+### acquire(key, ttl, owner?)
+
+Acquires a distributed lock using MongoDB's unique index constraint. Automatically expires via TTL index.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  Time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string">
+  Optional lock owner identifier (auto-generated if not provided)
+</ParamField>
+
+**Returns:** `Promise<LockHandle | null>` - Lock handle or null if already locked (duplicate key error)
+
+### extend(key, ttl, owner)
+
+Extends the TTL of an existing lock by updating the `expiresAt` field.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  New time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string" required>
+  Lock owner identifier
+</ParamField>
+
+**Returns:** `Promise<boolean>` - True if extended successfully
+
+### forceRelease(key)
+
+Forces release of a lock regardless of owner.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+## Cache Provider Methods
+
+### get(key)
+
+Retrieves a cached value. Automatically checks expiration (MongoDB TTL is eventually consistent).
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<T | null>` - Cached value or null if not found/expired
+
+### set(key, value, ttl?)
+
+Stores a value in the cache.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+<ParamField path="value" type="T" required>
+  Value to cache (stored as-is, no JSON serialization required)
+</ParamField>
+
+<ParamField path="ttl" type="number">
+  Time-to-live in milliseconds (optional)
+</ParamField>
+
+### delete(key)
+
+Removes a cached value.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+### has(key)
+
+Checks if a key exists in the cache.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<boolean>`
+
+### clear()
+
+Clears all cached values (respects key prefix if set).
+
+### keys(pattern?)
+
+Lists all cache keys matching an optional pattern.
+
+<ParamField path="pattern" type="string">
+  Optional regex pattern (e.g., `'user:.*'`)
+</ParamField>
+
+**Returns:** `Promise<string[]>` - Array of matching keys
+
+## Circuit Breaker Methods
+
+### getState(key)
+
+Retrieves circuit breaker state.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+**Returns:** `Promise<CircuitBreakerPersistedState | null>`
+
+### setState(key, state)
+
+Updates circuit breaker state.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+<ParamField path="state" type="CircuitBreakerPersistedState" required>
+  New state (state, failureCount, lastFailureTime, lastSuccessTime)
+</ParamField>
+
+### recordFailure(key, maxFailures)
+
+Records a failure and potentially opens the circuit.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+<ParamField path="maxFailures" type="number" required>
+  Maximum failures before opening circuit
+</ParamField>
+
+**Returns:** `Promise<number>` - Current failure count
+
+### recordSuccess(key)
+
+Records a success and closes the circuit.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+## Connection Example
+
+```typescript
+import { MongoClient } from 'mongodb'
+import { MongoDBAdapter } from '@go-go-scope/persistence-mongodb'
+
+const client = new MongoClient(process.env.MONGODB_URL, {
+  maxPoolSize: 10,
+  minPoolSize: 2,
+})
+
+await client.connect()
+
+const db = client.db('myapp')
+const persistence = new MongoDBAdapter(db, {
+  keyPrefix: 'prod:',
+})
+
+// Initialize indexes
+await persistence.connect()
+
+// Use with scope
+await using s = scope({ persistence })
+
+// Cleanup
+await persistence.disconnect()
+await client.close()
+```
+
+## MongoDB Atlas Example
+
+```typescript
+import { MongoClient } from 'mongodb'
+import { MongoDBAdapter } from '@go-go-scope/persistence-mongodb'
+
+const uri = `mongodb+srv://${process.env.ATLAS_USER}:${process.env.ATLAS_PASSWORD}@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`
+
+const client = new MongoClient(uri)
+await client.connect()
+
+const db = client.db('production')
+const persistence = new MongoDBAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+## Best Practices
+
+<Tip>
+  Call `connect()` once at application startup to create indexes. The adapter uses `createIndex()` which is idempotent.
+</Tip>
+
+<Warning>
+  MongoDB TTL indexes are eventually consistent with a background process that runs every 60 seconds. For strict expiration guarantees, the adapter also checks expiration client-side.
+</Warning>
+
+<Note>
+  Lock acquisition uses MongoDB's unique index constraint for atomic operations. Duplicate key errors (code 11000) indicate the lock is already held.
+</Note>
+
+## Performance Considerations
+
+- TTL indexes automatically clean up expired documents
+- Unique indexes provide atomic lock acquisition
+- Connection pooling is handled by the MongoClient
+- Use compound indexes for checkpoint queries on large datasets
+- Consider sharding for very high lock contention scenarios
+
+## Document Structure Examples
+
+### Lock Document
+
+```json
+{
+  "key": "myapp:lock:resource:123",
+  "owner": "1709482836123-abc123",
+  "expiresAt": ISODate("2024-03-03T12:34:56.000Z"),
+  "createdAt": ISODate("2024-03-03T12:34:26.000Z")
+}
+```
+
+### Circuit Breaker Document
+
+```json
+{
+  "key": "myapp:circuit:external-api",
+  "state": "open",
+  "failureCount": 5,
+  "lastFailureTime": ISODate("2024-03-03T12:34:56.000Z"),
+  "lastSuccessTime": ISODate("2024-03-03T12:30:00.000Z"),
+  "updatedAt": ISODate("2024-03-03T12:34:56.000Z")
+}
+```
+
+### Cache Document
+
+```json
+{
+  "key": "myapp:cache:user:123",
+  "value": { "name": "Alice", "role": "admin" },
+  "expiresAt": ISODate("2024-03-03T12:39:56.000Z"),
+  "updatedAt": ISODate("2024-03-03T12:34:56.000Z")
+}
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Redis Adapter" icon="database" href="/api/persistence/redis">
+    Redis-based persistence
+  </Card>
+  <Card title="DynamoDB Adapter" icon="database" href="/api/persistence/dynamodb">
+    DynamoDB-based persistence
+  </Card>
+</CardGroup>

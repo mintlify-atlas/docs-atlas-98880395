@@ -1,0 +1,498 @@
+---
+title: Hapi Adapter
+description: Request-scoped structured concurrency for Hapi applications
+---
+
+The Hapi adapter provides plugin-based integration of go-go-scope with Hapi's extension system.
+
+## Installation
+
+```bash
+npm install @go-go-scope/adapter-hapi go-go-scope @hapi/hapi
+```
+
+## Quick Start
+
+```typescript
+import Hapi from '@hapi/hapi'
+import { hapiGoGoScope } from '@go-go-scope/adapter-hapi'
+
+const server = Hapi.server({
+  port: 3000,
+  host: 'localhost'
+})
+
+// Register plugin
+await server.register({
+  plugin: hapiGoGoScope,
+  options: {
+    name: 'hapi-api',
+    timeout: 30000 // Optional: default timeout for all requests
+  }
+})
+
+server.route({
+  method: 'GET',
+  path: '/users/{id}',
+  handler: async (request) => {
+    const [err, user] = await request.scope.task(
+      () => fetchUser(request.params.id),
+      { retry: 'exponential', timeout: 5000 }
+    )
+
+    if (err) {
+      return { error: err.message }
+    }
+    return user
+  }
+})
+
+await server.start()
+console.log('Server running on %s', server.info.uri)
+```
+
+## Configuration Options
+
+<ParamField path="name" type="string" default="'hapi-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+## Plugin Architecture
+
+<Steps>
+  <Step title="Root Scope Creation">
+    The plugin creates a root scope and attaches it to `server.rootScope`
+  </Step>
+  
+  <Step title="Request Decoration">
+    Decorates the request object with `scope` and `rootScope` properties
+  </Step>
+  
+  <Step title="Extension Points">
+    Uses `onRequest` to create request scopes and `onPostResponse` for cleanup
+  </Step>
+  
+  <Step title="Server Lifecycle">
+    Disposes the root scope in the `onPostStop` extension
+  </Step>
+</Steps>
+
+## Helper Functions
+
+### getScope(request)
+
+Retrieves the request-scoped scope from the Hapi request:
+
+```typescript
+import { getScope } from '@go-go-scope/adapter-hapi'
+
+server.route({
+  method: 'GET',
+  path: '/data',
+  handler: async (request) => {
+    const scope = getScope(request)
+    const [err, data] = await scope.task(() => fetchData())
+    return data
+  }
+})
+```
+
+### getRootScope(server)
+
+Retrieves the root application scope from the Hapi server:
+
+```typescript
+import { getRootScope } from '@go-go-scope/adapter-hapi'
+
+const rootScope = getRootScope(server)
+await rootScope.task(() => startBackgroundJob())
+```
+
+### closeHapiScope(server)
+
+Gracefully disposes the root scope:
+
+```typescript
+import { closeHapiScope } from '@go-go-scope/adapter-hapi'
+
+process.on('SIGTERM', async () => {
+  await closeHapiScope(server)
+  await server.stop()
+})
+```
+
+## Usage Examples
+
+### REST API Routes
+
+<CodeGroup>
+```typescript GET
+import Hapi from '@hapi/hapi'
+import { hapiGoGoScope } from '@go-go-scope/adapter-hapi'
+
+const server = Hapi.server({ port: 3000 })
+await server.register({ plugin: hapiGoGoScope })
+
+server.route({
+  method: 'GET',
+  path: '/posts/{id}',
+  handler: async (request, h) => {
+    const [err, post] = await request.scope.task(
+      () => db.posts.findById(request.params.id)
+    )
+
+    if (err) {
+      return h.response({ error: 'Post not found' }).code(404)
+    }
+    return post
+  }
+})
+```
+
+```typescript POST
+server.route({
+  method: 'POST',
+  path: '/posts',
+  handler: async (request, h) => {
+    const [err, post] = await request.scope.task(
+      () => db.posts.create(request.payload),
+      { retry: 'exponential', timeout: 5000 }
+    )
+
+    if (err) {
+      return h.response({ error: err.message }).code(500)
+    }
+    
+    return h.response(post).code(201)
+  }
+})
+```
+
+```typescript DELETE
+server.route({
+  method: 'DELETE',
+  path: '/posts/{id}',
+  handler: async (request, h) => {
+    const [err] = await request.scope.task(
+      () => db.posts.delete(request.params.id)
+    )
+
+    if (err) {
+      return h.response({ error: err.message }).code(500)
+    }
+    
+    return h.response().code(204)
+  }
+})
+```
+</CodeGroup>
+
+### Parallel Operations
+
+```typescript
+server.route({
+  method: 'GET',
+  path: '/dashboard/{userId}',
+  handler: async (request) => {
+    const [err, results] = await request.scope.parallel([
+      () => fetchProfile(request.params.userId),
+      () => fetchPosts(request.params.userId),
+      () => fetchFollowers(request.params.userId)
+    ])
+
+    if (err) {
+      return { error: 'Failed to load dashboard' }
+    }
+
+    return {
+      profile: results[0],
+      posts: results[1],
+      followers: results[2]
+    }
+  }
+})
+```
+
+### Server-Sent Events
+
+```typescript
+import Hapi from '@hapi/hapi'
+import { hapiGoGoScope } from '@go-go-scope/adapter-hapi'
+
+const server = Hapi.server({ port: 3000 })
+await server.register({ plugin: hapiGoGoScope })
+
+server.route({
+  method: 'GET',
+  path: '/events',
+  handler: async (request, h) => {
+    const channel = request.scope.channel({ buffer: 100 })
+
+    // Producer
+    request.scope.task(async ({ signal }) => {
+      for (let i = 0; i < 50; i++) {
+        if (signal.aborted) break
+        await channel.send({ event: 'update', data: i })
+        await new Promise(r => setTimeout(r, 1000))
+      }
+      channel.close()
+    })
+
+    // Stream to response
+    const stream = new ReadableStream({
+      async start(controller) {
+        for await (const message of channel) {
+          controller.enqueue(
+            `data: ${JSON.stringify(message)}\n\n`
+          )
+        }
+        controller.close()
+      }
+    })
+
+    return h.response(stream)
+      .type('text/event-stream')
+      .header('Cache-Control', 'no-cache')
+      .header('Connection', 'keep-alive')
+  }
+})
+```
+
+### Circuit Breaker
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+import { hapiGoGoScope } from '@go-go-scope/adapter-hapi'
+
+const breaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000
+})
+
+const server = Hapi.server({ port: 3000 })
+await server.register({ plugin: hapiGoGoScope })
+
+server.route({
+  method: 'GET',
+  path: '/external',
+  handler: async (request, h) => {
+    const [err, response] = await request.scope.task(
+      async ({ signal }) => {
+        return breaker.execute(() =>
+          fetch('https://external-api.com/data', { signal })
+        )
+      }
+    )
+
+    if (err) {
+      if (breaker.state === 'open') {
+        return h.response({ error: 'Service unavailable' }).code(503)
+      }
+      return h.response({ error: err.message }).code(500)
+    }
+
+    return await response.json()
+  }
+})
+```
+
+### Plugin Composition
+
+```typescript
+import Hapi from '@hapi/hapi'
+import Inert from '@hapi/inert'
+import Vision from '@hapi/vision'
+import { hapiGoGoScope } from '@go-go-scope/adapter-hapi'
+
+const server = Hapi.server({ port: 3000 })
+
+// Register multiple plugins
+await server.register([
+  { plugin: Inert },
+  { plugin: Vision },
+  {
+    plugin: hapiGoGoScope,
+    options: { name: 'my-api', timeout: 15000 }
+  }
+])
+
+server.route({
+  method: 'GET',
+  path: '/data',
+  handler: async (request) => {
+    const [err, data] = await request.scope.task(() => fetchData())
+    if (err) return { error: err.message }
+    return data
+  }
+})
+```
+
+### Background Jobs
+
+```typescript
+import { hapiGoGoScope, getRootScope } from '@go-go-scope/adapter-hapi'
+
+const server = Hapi.server({ port: 3000 })
+await server.register({ plugin: hapiGoGoScope })
+
+// Start background job using root scope
+const rootScope = getRootScope(server)
+rootScope.task(async ({ signal }) => {
+  while (!signal.aborted) {
+    await processQueue()
+    await new Promise(r => setTimeout(r, 5000))
+  }
+})
+
+await server.start()
+```
+
+### Request Lifecycle Extensions
+
+```typescript
+import Hapi from '@hapi/hapi'
+import { hapiGoGoScope } from '@go-go-scope/adapter-hapi'
+
+const server = Hapi.server({ port: 3000 })
+await server.register({ plugin: hapiGoGoScope })
+
+// Add custom extension after scope creation
+server.ext('onPreHandler', (request, h) => {
+  // request.scope is available here
+  console.log('Request scope:', request.scope)
+  return h.continue
+})
+
+server.route({
+  method: 'GET',
+  path: '/test',
+  handler: async (request) => {
+    return { message: 'Scope available in extensions' }
+  }
+})
+```
+
+## Type Augmentation
+
+The adapter augments Hapi's types:
+
+```typescript
+declare module '@hapi/hapi' {
+  interface Request {
+    scope: Scope<Record<string, unknown>>
+    rootScope: Scope<Record<string, unknown>>
+  }
+  interface Server {
+    rootScope: Scope<Record<string, unknown>>
+  }
+}
+```
+
+This provides full type safety:
+
+```typescript
+server.route({
+  method: 'GET',
+  path: '/typed',
+  handler: async (request) => {
+    // TypeScript knows request.scope is Scope
+    const [err, data] = await request.scope.task(() => fetchData())
+    return data
+  }
+})
+```
+
+## Extension Points
+
+The plugin integrates with Hapi's extension system:
+
+<CodeGroup>
+```typescript onRequest
+// Request scope is created in onRequest
+server.ext('onRequest', (request, h) => {
+  request.scope = scope({
+    parent: rootScope,
+    name: `request-${request.id}`
+  })
+  return h.continue
+})
+```
+
+```typescript onPostResponse
+// Request scope is disposed in onPostResponse
+server.ext('onPostResponse', async (request, h) => {
+  await request.scope[Symbol.asyncDispose]()
+  return h.continue
+})
+```
+
+```typescript onPostStop
+// Root scope is disposed on server stop
+server.ext('onPostStop', async () => {
+  await rootScope[Symbol.asyncDispose]()
+})
+```
+</CodeGroup>
+
+## Graceful Shutdown
+
+```typescript
+import { closeHapiScope } from '@go-go-scope/adapter-hapi'
+
+const shutdown = async () => {
+  console.log('Shutting down gracefully...')
+  
+  // Dispose root scope (cancels all tasks)
+  await closeHapiScope(server)
+  
+  // Stop Hapi server
+  await server.stop({ timeout: 10000 })
+  
+  console.log('Server stopped')
+  process.exit(0)
+}
+
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Register plugin early">
+    Register the plugin before defining routes to ensure scopes are available in all handlers.
+  </Accordion>
+
+  <Accordion title="Use request scope for request-specific tasks">
+    Always use `request.scope.task()` for operations tied to a single request.
+  </Accordion>
+
+  <Accordion title="Use root scope for background jobs">
+    Access `server.rootScope` for application-level tasks that outlive requests.
+  </Accordion>
+
+  <Accordion title="Implement graceful shutdown">
+    Always call `closeHapiScope(server)` before stopping the server.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Fastify Adapter" icon="bolt" href="/api/adapters/fastify">
+    Fastify plugin integration
+  </Card>
+  <Card title="Koa Adapter" icon="layer-group" href="/api/adapters/koa">
+    Koa middleware integration
+  </Card>
+  <Card title="Express Adapter" icon="node" href="/api/adapters/express">
+    Express middleware integration
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

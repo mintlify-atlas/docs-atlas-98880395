@@ -1,0 +1,437 @@
+---
+title: 'SQLite Adapter'
+description: 'SQLite persistence adapter for distributed locks, circuit breaker state, and caching'
+---
+
+## Overview
+
+The SQLite persistence adapter provides distributed locks, circuit breaker state management, and caching using SQLite as the backend. Ideal for single-node deployments, testing, or embedded applications where a lightweight database is preferred.
+
+## Installation
+
+```bash
+npm install @go-go-scope/persistence-sqlite sqlite3
+```
+
+## Features
+
+- **In-Memory Locks**: Fast in-memory locks with TTL tracking
+- **Circuit Breaker State**: Persistent failure tracking with SQLite storage
+- **Caching**: Database-backed cache with TTL support
+- **Checkpoints**: Full checkpoint support for task recovery
+- **Idempotency**: Prevent duplicate operations (via `SQLiteIdempotencyAdapter`)
+- **Auto Schema**: Automatic table creation on connect
+- **Single File**: All data in a single SQLite database file
+- **Zero Dependencies**: No external services required
+
+## Basic Usage
+
+<CodeGroup>
+
+```typescript Basic Setup
+import sqlite3 from 'sqlite3'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite'
+import { scope } from 'go-go-scope'
+
+const db = new sqlite3.Database('/tmp/app.db')
+const persistence = new SQLiteAdapter(db, { keyPrefix: 'myapp:' })
+
+// Initialize tables
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+```typescript In-Memory Database
+import sqlite3 from 'sqlite3'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite'
+import { scope } from 'go-go-scope'
+
+// Use in-memory database (fast but not persistent)
+const db = new sqlite3.Database(':memory:')
+const persistence = new SQLiteAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+```typescript With Lock
+import sqlite3 from 'sqlite3'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite'
+import { scope } from 'go-go-scope'
+
+const db = new sqlite3.Database('./myapp.db')
+const persistence = new SQLiteAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+
+// Acquire a lock with 30 second TTL
+const lock = await s.acquireLock('resource:123', 30000)
+if (!lock) {
+  throw new Error('Could not acquire lock')
+}
+
+try {
+  // Do work with exclusive access
+  await processResource()
+} finally {
+  await lock.release()
+}
+```
+
+```typescript With Caching
+import sqlite3 from 'sqlite3'
+import { SQLiteCacheAdapter } from '@go-go-scope/persistence-sqlite'
+import { scope } from 'go-go-scope'
+
+const db = new sqlite3.Database('./cache.db')
+const cache = new SQLiteCacheAdapter(db)
+
+await cache.connect()
+
+await using s = scope({ cache })
+
+// Cache with 5 minute TTL
+await s.cache.set('user:123', { name: 'Alice' }, 300000)
+
+const user = await s.cache.get('user:123')
+console.log(user) // { name: 'Alice' }
+```
+
+</CodeGroup>
+
+## Configuration
+
+<ParamField path="db" type="Database" required>
+  sqlite3 Database instance
+</ParamField>
+
+<ParamField path="options" type="PersistenceAdapterOptions">
+  Configuration options
+  
+  <Expandable title="properties">
+    <ParamField path="keyPrefix" type="string">
+      Prefix for all database keys (e.g., `'myapp:'`). Useful for namespace isolation in shared databases.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Database Schema
+
+The adapter automatically creates the following tables on `connect()`:
+
+### go_goscope_circuit
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_circuit (
+  key TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_failure_time INTEGER,
+  last_success_time INTEGER,
+  updated_at INTEGER NOT NULL
+);
+```
+
+### go_goscope_cache
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_cache (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  expires_at INTEGER,
+  created_at INTEGER DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_cache_expires ON go_goscope_cache(expires_at);
+```
+
+### go_goscope_checkpoints
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_checkpoints (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  progress INTEGER NOT NULL DEFAULT 0,
+  data TEXT NOT NULL,
+  estimated_time_remaining INTEGER,
+  created_at INTEGER DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON go_goscope_checkpoints(task_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_sequence ON go_goscope_checkpoints(task_id, sequence);
+```
+
+## Lock Provider Methods
+
+### acquire(key, ttl, owner?)
+
+Acquires an in-memory lock with TTL tracking. Locks are not persisted to the database for performance.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  Time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string">
+  Optional lock owner identifier (auto-generated if not provided)
+</ParamField>
+
+**Returns:** `Promise<LockHandle | null>` - Lock handle or null if already locked
+
+<Note>
+  Locks are stored in-memory for performance. They are not persisted across application restarts. For persistent locks, use PostgreSQL or MySQL adapters.
+</Note>
+
+### extend(key, ttl, owner)
+
+Extends the TTL of an existing lock.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  New time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string" required>
+  Lock owner identifier
+</ParamField>
+
+**Returns:** `Promise<boolean>` - True if extended successfully
+
+### forceRelease(key)
+
+Forces release of a lock regardless of owner.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+## Cache Provider Methods
+
+### get(key)
+
+Retrieves a cached value from SQLite.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<T | null>` - Cached value or null if not found/expired
+
+### set(key, value, ttl?)
+
+Stores a value in the cache (JSON serialized).
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+<ParamField path="value" type="T" required>
+  Value to cache (must be JSON-serializable)
+</ParamField>
+
+<ParamField path="ttl" type="number">
+  Time-to-live in milliseconds (optional)
+</ParamField>
+
+### delete(key)
+
+Removes a cached value.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+### has(key)
+
+Checks if a key exists and is not expired.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<boolean>`
+
+### clear()
+
+Clears all cached values (respects key prefix if set).
+
+### keys(pattern?)
+
+Lists all cache keys matching an optional pattern.
+
+<ParamField path="pattern" type="string">
+  Optional SQL LIKE pattern with wildcards (e.g., `'user:*'` becomes `'user:%'`)
+</ParamField>
+
+**Returns:** `Promise<string[]>` - Array of matching keys
+
+## Circuit Breaker Methods
+
+### getState(key)
+
+Retrieves circuit breaker state from SQLite.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+**Returns:** `Promise<CircuitBreakerPersistedState | null>`
+
+### setState(key, state)
+
+Updates circuit breaker state.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+<ParamField path="state" type="CircuitBreakerPersistedState" required>
+  New state (state, failureCount, lastFailureTime, lastSuccessTime)
+</ParamField>
+
+### recordFailure(key, maxFailures)
+
+Records a failure and potentially opens the circuit.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+<ParamField path="maxFailures" type="number" required>
+  Maximum failures before opening circuit
+</ParamField>
+
+**Returns:** `Promise<number>` - Current failure count
+
+### recordSuccess(key)
+
+Records a success and closes the circuit.
+
+<ParamField path="key" type="string" required>
+  Circuit breaker identifier
+</ParamField>
+
+## Connection Example
+
+```typescript
+import sqlite3 from 'sqlite3'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite'
+
+// File-based database
+const db = new sqlite3.Database('./data/app.db')
+
+const persistence = new SQLiteAdapter(db, {
+  keyPrefix: 'myapp:',
+})
+
+// Initialize tables
+await persistence.connect()
+
+// Use with scope
+await using s = scope({ persistence })
+
+// Cleanup
+await persistence.disconnect()
+```
+
+## In-Memory Database
+
+For testing or temporary data:
+
+```typescript
+import sqlite3 from 'sqlite3'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite'
+
+const db = new sqlite3.Database(':memory:')
+const persistence = new SQLiteAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+## Bun Runtime Support
+
+For Bun runtime, use the specialized Bun adapter:
+
+```typescript
+import { Database } from 'bun:sqlite'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite-bun'
+
+const db = new Database('./app.db')
+const persistence = new SQLiteAdapter(db)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+## Best Practices
+
+<Tip>
+  Use file-based databases for persistence or in-memory databases for testing. In-memory databases are extremely fast but don't survive restarts.
+</Tip>
+
+<Warning>
+  Locks are stored in-memory and will be lost on application restart. For distributed locking across multiple instances, use Redis or PostgreSQL.
+</Warning>
+
+<Note>
+  SQLite is single-writer. For high-concurrency scenarios with multiple processes, consider PostgreSQL or MySQL.
+</Note>
+
+## Performance Considerations
+
+- Locks are in-memory for maximum performance
+- Circuit breaker state and cache are persisted to SQLite
+- Use WAL mode for better concurrency: `PRAGMA journal_mode=WAL;`
+- Enable foreign keys if needed: `PRAGMA foreign_keys=ON;`
+- Consider connection pooling for Node.js clusters
+- Use indexes for checkpoint queries on large datasets
+
+## WAL Mode Example
+
+```typescript
+import sqlite3 from 'sqlite3'
+import { SQLiteAdapter } from '@go-go-scope/persistence-sqlite'
+
+const db = new sqlite3.Database('./app.db')
+
+// Enable WAL mode for better concurrency
+db.run('PRAGMA journal_mode=WAL;')
+db.run('PRAGMA synchronous=NORMAL;')
+
+const persistence = new SQLiteAdapter(db)
+await persistence.connect()
+```
+
+## Use Cases
+
+- **Single-node applications**: Desktop apps, CLI tools, serverless functions
+- **Development and testing**: Fast iteration with zero external dependencies
+- **Embedded systems**: IoT devices, edge computing
+- **Local caching**: Fast local cache with persistence
+- **Prototyping**: Quick proof-of-concept without infrastructure
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="PostgreSQL Adapter" icon="database" href="/api/persistence/postgres">
+    PostgreSQL-based persistence
+  </Card>
+  <Card title="MySQL Adapter" icon="database" href="/api/persistence/mysql">
+    MySQL-based persistence
+  </Card>
+</CardGroup>

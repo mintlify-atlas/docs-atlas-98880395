@@ -1,0 +1,488 @@
+---
+title: 'DynamoDB Adapter'
+description: 'DynamoDB persistence adapter for distributed locks, circuit breaker state, and caching'
+---
+
+## Overview
+
+The DynamoDB persistence adapter provides distributed locks, circuit breaker state management, caching, and checkpoint support using AWS DynamoDB as the backend. It uses a single-table design with native TTL support for automatic expiration.
+
+## Installation
+
+```bash
+npm install @go-go-scope/persistence-dynamodb @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
+```
+
+## Features
+
+- **Distributed Locks**: Atomic locks using conditional writes
+- **Circuit Breaker State**: Persistent failure tracking
+- **Caching**: Serverless cache with DynamoDB TTL
+- **Checkpoints**: Full checkpoint support for task recovery
+- **Idempotency**: Prevent duplicate operations (via `DynamoDBIdempotencyAdapter`)
+- **Single-Table Design**: All data in one table with partition/sort keys
+- **Native TTL**: Automatic expiration via DynamoDB TTL attribute
+- **Serverless**: No infrastructure to manage
+
+## Basic Usage
+
+<CodeGroup>
+
+```typescript Basic Setup
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBAdapter } from '@go-go-scope/persistence-dynamodb'
+import { scope } from 'go-go-scope'
+
+const client = DynamoDBDocumentClient.from(new DynamoDBClient({}))
+const persistence = new DynamoDBAdapter(client, 'go-goscope-prod', {
+  keyPrefix: 'myapp:',
+})
+
+await using s = scope({ persistence })
+```
+
+```typescript With Lock
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBAdapter } from '@go-go-scope/persistence-dynamodb'
+import { scope } from 'go-go-scope'
+
+const client = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ region: 'us-east-1' })
+)
+
+const persistence = new DynamoDBAdapter(client, 'my-table')
+
+await using s = scope({ persistence })
+
+// Acquire a distributed lock with 30 second TTL
+const lock = await s.acquireLock('resource:123', 30000)
+if (!lock) {
+  throw new Error('Could not acquire lock')
+}
+
+try {
+  // Do work with exclusive access
+  await processResource()
+} finally {
+  await lock.release()
+}
+```
+
+```typescript With Checkpoints
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBAdapter } from '@go-go-scope/persistence-dynamodb'
+import { scope } from 'go-go-scope'
+
+const client = DynamoDBDocumentClient.from(new DynamoDBClient({}))
+const persistence = new DynamoDBAdapter(client, 'my-table')
+
+await using s = scope({ persistence })
+
+// Save checkpoint during long-running task
+const taskId = 'data-migration-2024'
+let processed = 0
+
+for (const batch of dataBatches) {
+  await processBatch(batch)
+  processed += batch.length
+  
+  await persistence.save({
+    id: `${taskId}:${Date.now()}`,
+    taskId,
+    sequence: processed,
+    timestamp: Date.now(),
+    progress: Math.floor((processed / totalRecords) * 100),
+    data: { lastRecordId: batch[batch.length - 1].id },
+  })
+}
+
+// Resume from checkpoint
+const checkpoint = await persistence.loadLatest(taskId)
+if (checkpoint) {
+  console.log(`Resuming from ${checkpoint.progress}% complete`)
+}
+```
+
+</CodeGroup>
+
+## Configuration
+
+<ParamField path="client" type="DynamoDBDocumentClient" required>
+  DynamoDB Document Client from @aws-sdk/lib-dynamodb
+</ParamField>
+
+<ParamField path="tableName" type="string" required>
+  Name of the DynamoDB table to use (table must be pre-created)
+</ParamField>
+
+<ParamField path="options" type="PersistenceAdapterOptions">
+  Configuration options
+  
+  <Expandable title="properties">
+    <ParamField path="keyPrefix" type="string">
+      Prefix for all item keys (e.g., `'myapp:'`). Useful for namespace isolation in shared tables.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Table Schema (Single-Table Design)
+
+You must create the DynamoDB table with the following schema:
+
+```typescript
+{
+  TableName: 'go-goscope-prod',
+  KeySchema: [
+    { AttributeName: 'pk', KeyType: 'HASH' },  // Partition key
+    { AttributeName: 'sk', KeyType: 'RANGE' }  // Sort key
+  ],
+  AttributeDefinitions: [
+    { AttributeName: 'pk', AttributeType: 'S' },
+    { AttributeName: 'sk', AttributeType: 'S' }
+  ],
+  TimeToLiveSpecification: {
+    Enabled: true,
+    AttributeName: 'expiresAt'
+  },
+  BillingMode: 'PAY_PER_REQUEST' // or PROVISIONED
+}
+```
+
+### Key Patterns
+
+- **Locks**: `pk = LOCK#{prefix}lock:{key}`, `sk = METADATA`
+- **Circuit Breaker**: `pk = CB#{prefix}circuit:{key}`, `sk = METADATA`
+- **Cache**: `pk = CACHE#{prefix}cache:{key}`, `sk = METADATA`
+- **Checkpoints**: `pk = CHECKPOINT#{prefix}{taskId}:{sequence}`, `sk = METADATA`
+
+### Optional Global Secondary Index
+
+For efficient `keys()` queries on cache items, create a GSI:
+
+```typescript
+{
+  IndexName: 'sk-pk-index',
+  KeySchema: [
+    { AttributeName: 'sk', KeyType: 'HASH' },
+    { AttributeName: 'pk', KeyType: 'RANGE' }
+  ],
+  Projection: { ProjectionType: 'ALL' },
+  BillingMode: 'PAY_PER_REQUEST'
+}
+```
+
+## Lock Provider Methods
+
+### acquire(key, ttl, owner?)
+
+Acquires a distributed lock using DynamoDB conditional writes. Automatically expires via TTL.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  Time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string">
+  Optional lock owner identifier (auto-generated if not provided)
+</ParamField>
+
+**Returns:** `Promise<LockHandle | null>` - Lock handle or null if already locked (ConditionalCheckFailedException)
+
+### extend(key, ttl, owner)
+
+Extends the TTL of an existing lock.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  New time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string" required>
+  Lock owner identifier
+</ParamField>
+
+**Returns:** `Promise<boolean>` - True if extended successfully
+
+### forceRelease(key)
+
+Forces release of a lock regardless of owner.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+## Cache Provider Methods
+
+### get(key)
+
+Retrieves a cached value. Checks expiration client-side (DynamoDB TTL is eventually consistent).
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<T | null>` - Cached value or null if not found/expired
+
+### set(key, value, ttl?)
+
+Stores a value in the cache.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+<ParamField path="value" type="T" required>
+  Value to cache (DynamoDB supports complex objects)
+</ParamField>
+
+<ParamField path="ttl" type="number">
+  Time-to-live in milliseconds (optional)
+</ParamField>
+
+### delete(key)
+
+Removes a cached value.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+### has(key)
+
+Checks if a key exists and is not expired.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<boolean>`
+
+### clear()
+
+Clears all cached values (scans and deletes in batches).
+
+### keys(pattern?)
+
+Lists all cache keys matching an optional pattern (requires GSI).
+
+<ParamField path="pattern" type="string">
+  Optional regex pattern
+</ParamField>
+
+**Returns:** `Promise<string[]>` - Array of matching keys
+
+## Checkpoint Provider Methods
+
+### save(checkpoint)
+
+Saves a checkpoint for task recovery.
+
+<ParamField path="checkpoint" type="Checkpoint<T>" required>
+  Checkpoint data including taskId, sequence, progress, and data
+</ParamField>
+
+### load(checkpointId)
+
+Loads a specific checkpoint by ID (uses Scan).
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint identifier
+</ParamField>
+
+**Returns:** `Promise<Checkpoint<T> | undefined>`
+
+### loadLatest(taskId)
+
+Loads the most recent checkpoint for a task (requires GSI).
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+**Returns:** `Promise<Checkpoint<T> | undefined>`
+
+### list(taskId)
+
+Lists all checkpoints for a task (requires GSI).
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+**Returns:** `Promise<Checkpoint<unknown>[]>`
+
+### cleanup(taskId, keepCount)
+
+Deletes old checkpoints, keeping only the most recent N.
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+<ParamField path="keepCount" type="number" required>
+  Number of checkpoints to keep
+</ParamField>
+
+### deleteAll(taskId)
+
+Deletes all checkpoints for a task.
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+## CloudFormation Template
+
+```yaml
+Resources:
+  GoGoScopeTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: go-goscope-prod
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: expiresAt
+      GlobalSecondaryIndexes:
+        - IndexName: sk-pk-index
+          KeySchema:
+            - AttributeName: sk
+              KeyType: HASH
+            - AttributeName: pk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Application
+          Value: go-go-scope
+```
+
+## Connection Example
+
+```typescript
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBAdapter } from '@go-go-scope/persistence-dynamodb'
+
+const client = DynamoDBDocumentClient.from(
+  new DynamoDBClient({
+    region: process.env.AWS_REGION || 'us-east-1',
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
+  })
+)
+
+const persistence = new DynamoDBAdapter(client, 'go-goscope-prod', {
+  keyPrefix: 'myapp:',
+})
+
+// Use with scope
+await using s = scope({ persistence })
+```
+
+## Best Practices
+
+<Tip>
+  Use on-demand billing mode for unpredictable workloads. Switch to provisioned capacity with auto-scaling for predictable high-throughput scenarios.
+</Tip>
+
+<Warning>
+  DynamoDB TTL deletion is eventually consistent and may take up to 48 hours. The adapter checks expiration client-side for immediate consistency.
+</Warning>
+
+<Note>
+  Lock acquisition uses conditional writes (`attribute_not_exists(pk) OR expiresAt < :now`) which are atomic and strongly consistent.
+</Note>
+
+## Performance Considerations
+
+- Single-table design minimizes RCU/WCU consumption
+- TTL automatically deletes expired items (no cost)
+- Use on-demand billing for variable workloads
+- Consider provisioned capacity + auto-scaling for sustained high throughput
+- GSI required for `keys()` and checkpoint queries
+- Batch operations for checkpoint cleanup
+
+## Cost Optimization
+
+- Use TTL for automatic cleanup (no write cost)
+- Enable point-in-time recovery for production
+- Use DynamoDB Streams for audit logging (optional)
+- Monitor with CloudWatch metrics
+- Consider DynamoDB Global Tables for multi-region HA
+
+## Item Structure Examples
+
+### Lock Item
+
+```json
+{
+  "pk": "LOCK#myapp:lock:resource:123",
+  "sk": "METADATA",
+  "owner": "1709482836123-abc123",
+  "expiresAt": 1709482866,
+  "data": { "acquiredAt": 1709482836123 },
+  "version": 1
+}
+```
+
+### Circuit Breaker Item
+
+```json
+{
+  "pk": "CB#myapp:circuit:external-api",
+  "sk": "METADATA",
+  "data": {
+    "state": "open",
+    "failureCount": 5,
+    "lastFailureTime": 1709482836123,
+    "lastSuccessTime": 1709482536123
+  },
+  "expiresAt": 1709486436,
+  "version": 1
+}
+```
+
+### Cache Item
+
+```json
+{
+  "pk": "CACHE#myapp:cache:user:123",
+  "sk": "METADATA",
+  "data": { "name": "Alice", "role": "admin" },
+  "expiresAt": 1709483136,
+  "version": 1
+}
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="MongoDB Adapter" icon="leaf" href="/api/persistence/mongodb">
+    MongoDB-based persistence
+  </Card>
+  <Card title="Redis Adapter" icon="database" href="/api/persistence/redis">
+    Redis-based persistence
+  </Card>
+</CardGroup>

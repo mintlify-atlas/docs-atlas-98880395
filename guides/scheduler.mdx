@@ -1,0 +1,570 @@
+---
+title: "Scheduler"
+description: "Distributed job scheduler with cron expressions, Web UI, and multiple storage backends"
+---
+
+## Overview
+
+The Scheduler provides enterprise-grade distributed job scheduling with:
+
+- **Cron Expressions** - Standard cron syntax with timezone support
+- **Distributed Architecture** - Admin + Workers pattern for high availability
+- **Multiple Storage Backends** - Redis, PostgreSQL, MySQL, SQLite, In-Memory
+- **Web UI** - Visual schedule management and monitoring
+- **Type Safety** - Fully typed schedule payloads
+
+<Note>
+Scheduler requires storage that supports auto-scheduling (`InMemoryJobStorage`, `RedisJobStorage`, or `SQLJobStorage`).
+</Note>
+
+## Installation
+
+```bash
+npm install go-go-scope @go-go-scope/scheduler
+
+# Optional: Storage adapters
+npm install @go-go-scope/persistence-redis
+npm install @go-go-scope/persistence-postgres
+```
+
+## Basic Usage
+
+Create a scheduler, define schedules, and register handlers:
+
+```typescript
+import { Scheduler, InMemoryJobStorage, CronPresets } from '@go-go-scope/scheduler';
+
+// Create scheduler with in-memory storage
+const scheduler = new Scheduler({
+  storage: new InMemoryJobStorage(),
+});
+
+// Create a schedule
+await scheduler.createSchedule('daily-report', {
+  cron: CronPresets.DAILY_AT_MIDNIGHT,
+  timezone: 'America/New_York',
+  enabled: true,
+});
+
+// Register handler
+scheduler.onSchedule('daily-report', async (job, scope) => {
+  console.log('Generating daily report...');
+  await generateReport();
+});
+
+// Start scheduler
+scheduler.start();
+```
+
+## Cron Expressions
+
+### Syntax
+
+Cron expressions use 5 fields: `minute hour day month dayOfWeek`
+
+```
+┌───────── minute (0 - 59)
+│ ┌───────── hour (0 - 23)
+│ │ ┌───────── day of month (1 - 31)
+│ │ │ ┌───────── month (1 - 12)
+│ │ │ │ ┌───────── day of week (0 - 6, 0 = Sunday)
+│ │ │ │ │
+* * * * *
+```
+
+### Presets
+
+```typescript
+import { CronPresets } from '@go-go-scope/scheduler';
+
+CronPresets.EVERY_MINUTE           // "* * * * *"
+CronPresets.EVERY_5_MINUTES        // "*/5 * * * *"
+CronPresets.EVERY_HOUR             // "0 * * * *"
+CronPresets.EVERY_DAY_AT_MIDNIGHT  // "0 0 * * *"
+CronPresets.EVERY_WEEK_ON_MONDAY   // "0 0 * * 1"
+CronPresets.EVERY_MONTH            // "0 0 1 * *"
+CronPresets.WORKDAY_MORNING        // "0 9 * * 1-5" (9 AM, Mon-Fri)
+CronPresets.WEEKEND_AFTERNOON      // "0 14 * * 0,6" (2 PM, Sat-Sun)
+```
+
+### Custom Expressions
+
+<CodeGroup>
+
+```typescript Every 15 minutes
+await scheduler.createSchedule('frequent-sync', {
+  cron: '*/15 * * * *',  // Every 15 minutes
+});
+```
+
+```typescript Business Hours
+await scheduler.createSchedule('business-hours-task', {
+  cron: '0 9-17 * * 1-5',  // Every hour 9 AM - 5 PM, Mon-Fri
+  timezone: 'America/New_York',
+});
+```
+
+```typescript First of Month
+await scheduler.createSchedule('monthly-report', {
+  cron: '0 0 1 * *',  // Midnight on 1st of every month
+});
+```
+
+```typescript Specific Days
+await scheduler.createSchedule('twice-weekly', {
+  cron: '0 10 * * 2,5',  // 10 AM on Tuesdays and Fridays
+});
+```
+
+</CodeGroup>
+
+## Timezone Support
+
+Schedules run in specific timezones using IANA timezone identifiers:
+
+```typescript
+await scheduler.createSchedule('tokyo-task', {
+  cron: '0 9 * * *',  // 9 AM
+  timezone: 'Asia/Tokyo',  // In Tokyo time
+});
+
+await scheduler.createSchedule('ny-task', {
+  cron: '0 9 * * *',  // 9 AM
+  timezone: 'America/New_York',  // In New York time
+});
+```
+
+<Tip>
+Use timezone support for global applications to ensure schedules run at the correct local time.
+</Tip>
+
+## Type-Safe Schedules
+
+Define typed payload schemas for compile-time safety:
+
+```typescript
+import { Scheduler } from '@go-go-scope/scheduler';
+
+// Define schedule types
+type AppSchedules = {
+  'send-email': {
+    to: string;
+    subject: string;
+    body: string;
+  };
+  'process-payment': {
+    amount: number;
+    currency: string;
+    userId: string;
+  };
+  'generate-report': {
+    reportType: 'daily' | 'weekly' | 'monthly';
+    recipients: string[];
+  };
+};
+
+// Create typed scheduler
+const scheduler = new Scheduler<AppSchedules>({ storage });
+
+// TypeScript enforces payload types
+scheduler.onSchedule('send-email', async (job) => {
+  // job.payload is typed as { to: string; subject: string; body: string }
+  const { to, subject, body } = job.payload;
+  await sendEmail({ to, subject, body });
+});
+
+// Trigger with type checking
+await scheduler.triggerSchedule('send-email', {
+  to: 'user@example.com',
+  subject: 'Hello',
+  body: 'World',
+});
+```
+
+## Storage Backends
+
+### In-Memory (Development)
+
+```typescript
+import { InMemoryJobStorage } from '@go-go-scope/scheduler';
+
+const storage = new InMemoryJobStorage();
+const scheduler = new Scheduler({ storage });
+```
+
+### Redis (Production)
+
+```typescript
+import { RedisJobStorage } from '@go-go-scope/persistence-redis';
+import { createClient } from 'redis';
+
+const redis = createClient({ url: 'redis://localhost:6379' });
+await redis.connect();
+
+const storage = new RedisJobStorage({ client: redis });
+const scheduler = new Scheduler({ storage });
+```
+
+### PostgreSQL
+
+```typescript
+import { SQLJobStorage } from '@go-go-scope/persistence-postgres';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  host: 'localhost',
+  database: 'myapp',
+  user: 'postgres',
+  password: 'password',
+});
+
+const storage = new SQLJobStorage({ pool, dialect: 'postgres' });
+const scheduler = new Scheduler({ storage });
+```
+
+### SQLite
+
+```typescript
+import { SQLJobStorage } from '@go-go-scope/persistence-sqlite';
+import Database from 'better-sqlite3';
+
+const db = new Database('./scheduler.db');
+const storage = new SQLJobStorage({ db, dialect: 'sqlite' });
+const scheduler = new Scheduler({ storage });
+```
+
+## Web UI
+
+Enable the built-in web interface:
+
+```typescript
+const scheduler = new Scheduler({
+  storage,
+  enableWebUI: true,  // Enable Web UI
+  webUI: {
+    port: 3000,
+    path: '/scheduler',  // Access at http://localhost:3000/scheduler
+  },
+});
+
+// Web UI provides:
+// - Schedule list and status
+// - Job history and logs
+// - Manual job triggering
+// - Schedule enable/disable
+// - Real-time job monitoring
+```
+
+<img src="/images/scheduler-ui.png" alt="Scheduler Web UI" />
+
+## Schedule Management
+
+### Create Schedule
+
+```typescript
+await scheduler.createSchedule('backup-db', {
+  cron: '0 2 * * *',  // 2 AM daily
+  timezone: 'UTC',
+  enabled: true,
+  maxRetries: 3,
+  retryDelay: 60000,  // 1 minute
+  timeout: 300000,    // 5 minutes
+});
+```
+
+### Update Schedule
+
+```typescript
+await scheduler.updateSchedule('backup-db', {
+  cron: '0 3 * * *',  // Change to 3 AM
+  enabled: false,     // Disable schedule
+});
+```
+
+### Delete Schedule
+
+```typescript
+await scheduler.deleteSchedule('backup-db');
+```
+
+### List Schedules
+
+```typescript
+const schedules = await scheduler.listSchedules();
+
+for (const schedule of schedules) {
+  console.log(`${schedule.name}: ${schedule.cron} (${schedule.enabled ? 'enabled' : 'disabled'})`);
+}
+```
+
+### Get Schedule Stats
+
+```typescript
+const stats = await scheduler.getScheduleStats('backup-db');
+
+console.log(`Total runs: ${stats.totalRuns}`);
+console.log(`Successful: ${stats.successCount}`);
+console.log(`Failed: ${stats.failureCount}`);
+console.log(`Average duration: ${stats.averageDuration}ms`);
+```
+
+## Job Handlers
+
+### Register Handler
+
+```typescript
+scheduler.onSchedule('send-notifications', async (job, scope) => {
+  const { logger, signal } = scope;
+  
+  logger.info('Processing notifications', { jobId: job.id });
+  
+  // Use scope for concurrent operations
+  const results = await scope.parallel([
+    async ({ signal }) => sendEmailNotifications(signal),
+    async ({ signal }) => sendPushNotifications(signal),
+  ]);
+  
+  logger.info('Notifications sent', { results });
+});
+```
+
+### Handler with Retries
+
+```typescript
+import { exponentialBackoff } from 'go-go-scope';
+
+scheduler.onSchedule(
+  'unreliable-task',
+  async (job, scope) => {
+    // Task implementation
+    await unreliableOperation();
+  },
+  {
+    retry: {
+      maxRetries: 5,
+      delay: exponentialBackoff({ initial: 1000, max: 60000 }),
+    },
+    timeout: 30000,  // 30 second timeout
+  }
+);
+```
+
+### Worker Pool Handler
+
+Run CPU-intensive tasks in worker threads:
+
+```typescript
+scheduler.onSchedule(
+  'cpu-intensive',
+  async (job) => {
+    return computeHash(job.payload.data);
+  },
+  {
+    worker: true,  // Run in worker thread
+  }
+);
+```
+
+## Manual Triggering
+
+Trigger schedules manually:
+
+```typescript
+// Trigger immediately
+await scheduler.triggerSchedule('send-email', {
+  to: 'user@example.com',
+  subject: 'Manual trigger',
+  body: 'Hello!',
+});
+
+// Schedule for later
+await scheduler.scheduleJob('send-email', {
+  scheduledAt: new Date(Date.now() + 3600000),  // 1 hour from now
+  payload: {
+    to: 'user@example.com',
+    subject: 'Scheduled',
+    body: 'World',
+  },
+});
+```
+
+## Events
+
+Subscribe to scheduler events:
+
+```typescript
+// Job started
+scheduler.on('jobStarted', (job) => {
+  console.log(`Job ${job.id} started`);
+});
+
+// Job completed
+scheduler.on('jobCompleted', (job, result) => {
+  console.log(`Job ${job.id} completed`);
+});
+
+// Job failed
+scheduler.on('jobFailed', (job, error) => {
+  console.error(`Job ${job.id} failed:`, error);
+});
+
+// Schedule enabled/disabled
+scheduler.on('scheduleEnabled', (scheduleName) => {
+  console.log(`Schedule ${scheduleName} enabled`);
+});
+
+scheduler.on('scheduleDisabled', (scheduleName) => {
+  console.log(`Schedule ${scheduleName} disabled`);
+});
+```
+
+## High Availability
+
+Run multiple scheduler instances with leader election:
+
+```typescript
+const scheduler = new Scheduler({
+  storage,
+  enableLeaderElection: true,  // Enable HA mode
+  leaderHeartbeatInterval: 5000,   // 5 second heartbeat
+  leaderElectionTimeout: 15000,    // 15 second timeout
+  onBecomeLeader: async () => {
+    console.log('This instance is now the leader');
+  },
+});
+
+// Only the leader schedules jobs
+// Workers process jobs from the queue
+```
+
+## Monitoring
+
+### Metrics
+
+Enable metrics collection:
+
+```typescript
+const scheduler = new Scheduler({
+  storage,
+  metrics: true,  // Enable metrics
+});
+
+// Get metrics
+const metrics = await scheduler.getMetrics();
+
+console.log(`Active jobs: ${metrics.activeJobs}`);
+console.log(`Completed today: ${metrics.completedToday}`);
+console.log(`Failed today: ${metrics.failedToday}`);
+console.log(`Average duration: ${metrics.averageDuration}ms`);
+```
+
+### Deadlock Detection
+
+```typescript
+const scheduler = new Scheduler({
+  storage,
+  deadlockThreshold: 3600000,  // 1 hour
+});
+
+// Jobs running longer than 1 hour are flagged as potential deadlocks
+```
+
+## Real-World Examples
+
+### Email Campaign Scheduler
+
+```typescript
+type Schedules = {
+  'email-campaign': {
+    campaignId: string;
+    recipients: string[];
+  };
+};
+
+const scheduler = new Scheduler<Schedules>({ storage });
+
+// Schedule campaign
+await scheduler.createSchedule('email-campaign', {
+  cron: '0 9 * * 1',  // Every Monday at 9 AM
+  timezone: 'America/New_York',
+});
+
+// Handler
+scheduler.onSchedule('email-campaign', async (job, scope) => {
+  const { campaignId, recipients } = job.payload;
+  
+  // Send emails in parallel batches
+  const batches = chunkArray(recipients, 100);
+  
+  await scope.parallel(
+    batches.map(batch => async ({ signal }) => {
+      for (const email of batch) {
+        await sendEmail(campaignId, email, { signal });
+      }
+    }),
+    { concurrency: 5 }
+  );
+});
+```
+
+### Data Backup Scheduler
+
+```typescript
+import { exponentialBackoff } from 'go-go-scope';
+
+await scheduler.createSchedule('backup-database', {
+  cron: '0 2 * * *',  // 2 AM daily
+  timezone: 'UTC',
+  maxRetries: 3,
+});
+
+scheduler.onSchedule(
+  'backup-database',
+  async (job, scope) => {
+    const { logger } = scope;
+    
+    logger.info('Starting database backup');
+    
+    const backupPath = await createBackup();
+    await uploadToS3(backupPath);
+    await cleanupOldBackups();
+    
+    logger.info('Backup completed', { path: backupPath });
+  },
+  {
+    retry: {
+      maxRetries: 3,
+      delay: exponentialBackoff({ initial: 60000 }),
+    },
+    timeout: 1800000,  // 30 minute timeout
+  }
+);
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Type Safety" icon="shield">
+    Define typed schedule payloads for compile-time safety
+  </Card>
+  <Card title="Set Timeouts" icon="clock">
+    Always set reasonable timeouts for job handlers
+  </Card>
+  <Card title="Enable Retries" icon="rotate">
+    Use retries for transient failures
+  </Card>
+  <Card title="Monitor Metrics" icon="chart-line">
+    Track job success rates and durations
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Resilience Patterns" icon="shield" href="/guides/resilience-patterns">
+    Add circuit breakers and retries to jobs
+  </Card>
+  <Card title="Channels" icon="comments" href="/guides/channels">
+    Use channels for job queuing
+  </Card>
+</CardGroup>

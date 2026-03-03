@@ -1,0 +1,487 @@
+---
+title: Microservice Patterns
+description: Build resilient microservices with circuit breakers, retry logic, service discovery, and graceful shutdown using go-go-scope
+---
+
+# Microservice Patterns
+
+go-go-scope provides essential patterns for building resilient microservices including circuit breakers, retries, timeouts, and graceful shutdown.
+
+## Service-to-Service Communication
+
+Build resilient inter-service communication with automatic retries and circuit breakers.
+
+```typescript
+import { scope, CircuitBreaker } from 'go-go-scope'
+
+// Service client with circuit breaker
+class UserServiceClient {
+  private breaker = new CircuitBreaker({
+    failureThreshold: 5,
+    resetTimeout: 60000,     // 1 minute
+    halfOpenRequests: 3
+  })
+
+  async getUser(id: string) {
+    await using s = scope({ timeout: 5000 })
+
+    const [err, user] = await s.task(
+      async ({ signal }) => {
+        const response = await fetch(
+          `http://user-service/users/${id}`,
+          { signal }
+        )
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+        return response.json()
+      },
+      {
+        circuitBreaker: this.breaker,
+        retry: 'exponential',  // Exponential backoff
+        timeout: 3000
+      }
+    )
+
+    if (err) {
+      console.error(`Failed to fetch user ${id}:`, err.message)
+      return null
+    }
+
+    return user
+  }
+
+  async getUserOrders(userId: string) {
+    await using s = scope()
+
+    // Parallel service calls
+    const [err, results] = await s.parallel([
+      () => this.getUser(userId),
+      () => this.getOrderHistory(userId),
+      () => this.getPaymentMethods(userId)
+    ])
+
+    if (err) throw err
+
+    const [user, orders, payments] = results.map(r => r[1])
+
+    return { user, orders, payments }
+  }
+
+  private async getOrderHistory(userId: string) {
+    // Similar implementation with circuit breaker
+    await using s = scope({ timeout: 5000 })
+    const [err, orders] = await s.task(
+      async ({ signal }) => {
+        const response = await fetch(
+          `http://order-service/orders?userId=${userId}`,
+          { signal }
+        )
+        return response.json()
+      },
+      { circuitBreaker: this.breaker, retry: 'exponential' }
+    )
+    return orders || []
+  }
+
+  private async getPaymentMethods(userId: string) {
+    await using s = scope({ timeout: 5000 })
+    const [err, payments] = await s.task(
+      async ({ signal }) => {
+        const response = await fetch(
+          `http://payment-service/methods?userId=${userId}`,
+          { signal }
+        )
+        return response.json()
+      },
+      { circuitBreaker: this.breaker, retry: 'exponential' }
+    )
+    return payments || []
+  }
+}
+```
+
+## API Gateway Pattern
+
+Aggregate multiple microservices behind a unified API gateway.
+
+<Steps>
+  <Step title="Create service clients">
+    ```typescript
+    import { scope, CircuitBreaker, Semaphore } from 'go-go-scope'
+
+    // Rate limit concurrent requests to each service
+    const userServiceSemaphore = new Semaphore(20)
+    const orderServiceSemaphore = new Semaphore(15)
+    const inventoryServiceSemaphore = new Semaphore(10)
+
+    class ServiceGateway {
+      private userBreaker = new CircuitBreaker({ failureThreshold: 5 })
+      private orderBreaker = new CircuitBreaker({ failureThreshold: 5 })
+      private inventoryBreaker = new CircuitBreaker({ failureThreshold: 5 })
+
+      async callUserService(endpoint: string, options = {}) {
+        await using s = scope({ timeout: 5000 })
+        return s.task(
+          async ({ signal }) => {
+            await using permit = await userServiceSemaphore.acquire(signal)
+            const response = await fetch(
+              `http://user-service${endpoint}`,
+              { signal, ...options }
+            )
+            return response.json()
+          },
+          { circuitBreaker: this.userBreaker, retry: 'exponential' }
+        )
+      }
+
+      async callOrderService(endpoint: string, options = {}) {
+        await using s = scope({ timeout: 5000 })
+        return s.task(
+          async ({ signal }) => {
+            await using permit = await orderServiceSemaphore.acquire(signal)
+            const response = await fetch(
+              `http://order-service${endpoint}`,
+              { signal, ...options }
+            )
+            return response.json()
+          },
+          { circuitBreaker: this.orderBreaker, retry: 'exponential' }
+        )
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Implement gateway routes">
+    ```typescript
+    import fastify from 'fastify'
+    import { fastifyGoGoScope } from '@go-go-scope/adapter-fastify'
+
+    const app = fastify()
+    await app.register(fastifyGoGoScope)
+
+    const gateway = new ServiceGateway()
+
+    // Aggregation endpoint
+    app.get('/api/users/:id/complete', async (request, reply) => {
+      const userId = request.params.id
+
+      // Fetch from multiple services in parallel
+      const [err, results] = await request.scope.parallel([
+        () => gateway.callUserService(`/users/${userId}`),
+        () => gateway.callOrderService(`/orders?userId=${userId}`),
+        () => gateway.callInventoryService(`/inventory/${userId}`)
+      ])
+
+      if (err) {
+        return reply.code(500).send({ error: 'Failed to fetch data' })
+      }
+
+      const [userResult, ordersResult, inventoryResult] = results
+
+      return {
+        user: userResult[1],
+        orders: ordersResult[1],
+        inventory: inventoryResult[1]
+      }
+    })
+    ```
+  </Step>
+
+  <Step title="Add health checks">
+    ```typescript
+    app.get('/health', async (request, reply) => {
+      const [err, health] = await request.scope.parallel(
+        [
+          () => gateway.healthCheck('user-service'),
+          () => gateway.healthCheck('order-service'),
+          () => gateway.healthCheck('inventory-service')
+        ],
+        { timeout: 2000 }  // 2 second timeout for health checks
+      )
+
+      const services = {
+        'user-service': health?.[0]?.[1] || false,
+        'order-service': health?.[1]?.[1] || false,
+        'inventory-service': health?.[2]?.[1] || false
+      }
+
+      const allHealthy = Object.values(services).every(v => v)
+
+      return reply.code(allHealthy ? 200 : 503).send({
+        status: allHealthy ? 'healthy' : 'degraded',
+        services
+      })
+    })
+    ```
+  </Step>
+</Steps>
+
+## Event-Driven Architecture
+
+Use channels for event processing and pub/sub patterns.
+
+```typescript
+import { scope } from 'go-go-scope'
+
+// Event processor service
+class EventProcessor {
+  async start() {
+    await using s = scope({ name: 'event-processor' })
+
+    // Create broadcast channel for events
+    const events = s.broadcast<{
+      type: string
+      data: unknown
+      timestamp: number
+    }>()
+
+    // Subscribe multiple handlers
+    s.task(async () => {
+      for await (const event of events.subscribe()) {
+        if (event.type === 'order.created') {
+          await this.handleOrderCreated(event.data)
+        }
+      }
+    })
+
+    s.task(async () => {
+      for await (const event of events.subscribe()) {
+        if (event.type === 'user.registered') {
+          await this.handleUserRegistered(event.data)
+        }
+      }
+    })
+
+    // Analytics processor
+    s.task(async () => {
+      for await (const event of events.subscribe()) {
+        await this.recordAnalytics(event)
+      }
+    })
+
+    // Listen to message queue
+    s.task(async ({ signal }) => {
+      while (!signal.aborted) {
+        const message = await this.messageQueue.receive({ signal })
+        
+        if (message) {
+          await events.send({
+            type: message.type,
+            data: message.payload,
+            timestamp: Date.now()
+          })
+        }
+      }
+    })
+
+    // Keep service running
+    await new Promise((resolve) => {
+      process.on('SIGTERM', resolve)
+    })
+  }
+
+  private async handleOrderCreated(data: unknown) {
+    console.log('Processing order:', data)
+    // Send confirmation email, update inventory, etc.
+  }
+
+  private async handleUserRegistered(data: unknown) {
+    console.log('New user registered:', data)
+    // Send welcome email, create profile, etc.
+  }
+
+  private async recordAnalytics(event: unknown) {
+    // Send to analytics service
+  }
+}
+```
+
+## Graceful Shutdown
+
+Ensure clean service shutdown with proper resource cleanup.
+
+<CodeGroup>
+```typescript Basic Shutdown
+import { scope, setupEnhancedGracefulShutdown } from 'go-go-scope'
+import fastify from 'fastify'
+
+const app = fastify()
+await using s = scope({ name: 'my-service' })
+
+// Setup graceful shutdown
+const shutdown = setupEnhancedGracefulShutdown(s, {
+  strategy: 'drain',
+  drainTimeout: 10000,
+  timeout: 30000,
+  beforeShutdown: async () => {
+    console.log('Starting graceful shutdown...')
+    // Stop accepting new connections
+    await app.close()
+  },
+  afterShutdown: async () => {
+    console.log('Shutdown complete')
+    // Close database, message queues, etc.
+    await db.close()
+  }
+})
+
+// Your service logic
+app.get('/health', async () => ({ status: 'ok' }))
+
+await app.listen({ port: 3000 })
+console.log('Service started on port 3000')
+
+// Wait for shutdown
+await shutdown.shutdownComplete
+```
+
+```typescript Multi-Service Coordination
+import { createShutdownCoordinator, scope } from 'go-go-scope'
+
+const coordinator = createShutdownCoordinator()
+
+// Worker service (shuts down first)
+const workerScope = coordinator.register(
+  'worker',
+  scope({ name: 'worker' }),
+  { strategy: 'drain', drainTimeout: 5000 }
+)
+
+// API service (shuts down after worker)
+const apiScope = coordinator.register(
+  'api',
+  scope({ name: 'api' }),
+  { strategy: 'drain', drainTimeout: 10000 }
+)
+
+// API depends on worker being available
+coordinator.addDependency('api', 'worker')
+
+// Database connection (shuts down last)
+const dbScope = coordinator.register(
+  'database',
+  scope({ name: 'database' }),
+  { strategy: 'force', timeout: 2000 }
+)
+
+coordinator.addDependency('worker', 'database')
+coordinator.addDependency('api', 'database')
+
+// Trigger coordinated shutdown
+process.on('SIGTERM', async () => {
+  const results = await coordinator.shutdownAll('SIGTERM')
+  
+  for (const [name, error] of results) {
+    if (error) {
+      console.error(`Shutdown ${name} failed:`, error)
+    } else {
+      console.log(`Shutdown ${name}: success`)
+    }
+  }
+  
+  process.exit(0)
+})
+```
+</CodeGroup>
+
+## Health Check Implementation
+
+Implement comprehensive health checks for Kubernetes and monitoring.
+
+```typescript
+import { scope, parallel } from 'go-go-scope'
+import type { FastifyInstance } from 'fastify'
+
+class HealthChecker {
+  constructor(
+    private db: Database,
+    private redis: Redis,
+    private messageQueue: MessageQueue
+  ) {}
+
+  async check() {
+    await using s = scope({ timeout: 5000 })
+
+    const [err, results] = await s.parallel([
+      () => this.checkDatabase(),
+      () => this.checkRedis(),
+      () => this.checkMessageQueue(),
+      () => this.checkDiskSpace(),
+      () => this.checkMemory()
+    ])
+
+    const checks = {
+      database: results?.[0]?.[1] ?? false,
+      redis: results?.[1]?.[1] ?? false,
+      messageQueue: results?.[2]?.[1] ?? false,
+      diskSpace: results?.[3]?.[1] ?? false,
+      memory: results?.[4]?.[1] ?? false
+    }
+
+    const healthy = !err && Object.values(checks).every(v => v)
+
+    return {
+      status: healthy ? 'healthy' : 'unhealthy',
+      checks,
+      timestamp: new Date().toISOString()
+    }
+  }
+
+  private async checkDatabase(): Promise<boolean> {
+    try {
+      await this.db.query('SELECT 1')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async checkRedis(): Promise<boolean> {
+    try {
+      await this.redis.ping()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async checkMessageQueue(): Promise<boolean> {
+    try {
+      return await this.messageQueue.isConnected()
+    } catch {
+      return false
+    }
+  }
+
+  private async checkDiskSpace(): Promise<boolean> {
+    // Check available disk space
+    return true
+  }
+
+  private async checkMemory(): Promise<boolean> {
+    const usage = process.memoryUsage()
+    // Return false if memory usage is critical
+    return usage.heapUsed < usage.heapTotal * 0.9
+  }
+}
+
+// Register health check endpoints
+app.get('/health', async (request, reply) => {
+  const health = await healthChecker.check()
+  return reply.code(health.status === 'healthy' ? 200 : 503).send(health)
+})
+
+app.get('/ready', async (request, reply) => {
+  // Readiness probe for Kubernetes
+  const health = await healthChecker.check()
+  return reply.code(health.status === 'healthy' ? 200 : 503).send({
+    ready: health.status === 'healthy'
+  })
+})
+```
+
+<Note>
+  Combine circuit breakers, retries, timeouts, and graceful shutdown for production-ready microservices.
+</Note>

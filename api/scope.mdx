@@ -1,0 +1,1050 @@
+---
+title: 'Scope'
+description: 'Core structured concurrency primitive for managing task lifecycles'
+---
+
+## Overview
+
+The `Scope` class is the foundational building block of go-go-scope. It provides structured concurrency by managing tasks, resources, and cancellation signals in a hierarchical manner. All tasks spawned within a scope are automatically cancelled when the scope is disposed.
+
+## Factory Function
+
+### scope()
+
+The recommended way to create a scope is using the `scope()` factory function:
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope({
+  name: 'my-scope',
+  timeout: 5000,
+  concurrency: 10
+})
+```
+
+<ParamField path="options" type="ScopeOptions<Services>">
+  Configuration options for the scope
+
+  <Expandable title="properties">
+    <ParamField path="timeout" type="number">
+      Optional timeout in milliseconds. The scope will be aborted after this duration.
+    </ParamField>
+
+    <ParamField path="signal" type="AbortSignal">
+      Optional parent AbortSignal to link cancellation. When the parent aborts, this scope aborts.
+    </ParamField>
+
+    <ParamField path="name" type="string">
+      Optional name for the scope. Defaults to `"scope-{id}"`.
+    </ParamField>
+
+    <ParamField path="concurrency" type="number">
+      Optional concurrency limit for tasks. If set, only this many tasks will execute concurrently.
+    </ParamField>
+
+    <ParamField path="circuitBreaker" type="CircuitBreakerOptions">
+      Optional circuit breaker configuration. When set, all tasks execute through a circuit breaker.
+    </ParamField>
+
+    <ParamField path="parent" type="Scope<ParentServices>">
+      Optional parent scope. Child inherits parent's AbortSignal and services.
+    </ParamField>
+
+    <ParamField path="hooks" type="ScopeHooks">
+      Optional lifecycle hooks for scope events (beforeTask, afterTask, onCancel, etc.).
+    </ParamField>
+
+    <ParamField path="logger" type="Logger">
+      Optional custom logger for structured logging.
+    </ParamField>
+
+    <ParamField path="logLevel" type="'debug' | 'info' | 'warn' | 'error'">
+      Minimum log level for console logging (if no custom logger provided).
+    </ParamField>
+
+    <ParamField path="persistence" type="PersistenceProviders">
+      Optional persistence providers for distributed features (locks, circuit breaker state, idempotency, checkpoints).
+    </ParamField>
+
+    <ParamField path="idempotency" type="{ defaultTTL?: number }">
+      Idempotency configuration for the scope.
+    </ParamField>
+
+    <ParamField path="taskPooling" type="{ maxSize?: number; enabled?: boolean }">
+      Task pooling configuration for reducing GC pressure.
+    </ParamField>
+
+    <ParamField path="workerPool" type="{ size?: number; idleTimeout?: number }">
+      Worker pool configuration for CPU-intensive tasks. Only used when tasks are spawned with `worker: true`.
+    </ParamField>
+
+    <ParamField path="context" type="Record<string, unknown>">
+      Optional context object accessible in all tasks via the context parameter.
+    </ParamField>
+
+    <ParamField path="logCorrelation" type="boolean">
+      Enable log correlation with traceId and spanId. Default: false
+    </ParamField>
+
+    <ParamField path="traceId" type="string">
+      External trace ID for log correlation (for continuing traces from external sources).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="scope" type="Scope<Services>">
+  A new Scope instance configured with the given options
+</ResponseField>
+
+## Core Methods
+
+### task()
+
+Spawn a task within the scope. The task receives a context object with services, signal, logger, and optional checkpoint/progress utilities.
+
+```typescript
+const t = s.task(async ({ services, signal, logger, context }) => {
+  logger.info('Task started')
+  
+  // Check if cancelled
+  if (signal.aborted) {
+    throw new Error('Cancelled')
+  }
+  
+  // Use provided services
+  const db = services.database
+  const result = await db.query('SELECT * FROM users')
+  
+  return result
+}, {
+  timeout: 5000,
+  retry: 'exponential',
+  errorClass: DatabaseError
+})
+
+const [err, result] = await t
+```
+
+<ParamField path="fn" type="(ctx: TaskContext<Services>) => Promise<T>" required>
+  The task function to execute
+
+  <Expandable title="ctx properties">
+    <ParamField path="services" type="Services">
+      Services provided to the scope via `provide()`
+    </ParamField>
+
+    <ParamField path="signal" type="AbortSignal">
+      AbortSignal for cancellation detection
+    </ParamField>
+
+    <ParamField path="logger" type="Logger">
+      Structured logger with task context
+    </ParamField>
+
+    <ParamField path="context" type="Record<string, unknown>">
+      Context object from scope options
+    </ParamField>
+
+    <ParamField path="checkpoint" type="{ save: (data: unknown) => Promise<void>; data?: unknown }">
+      Checkpoint utilities (available when checkpoint provider is configured)
+    </ParamField>
+
+    <ParamField path="progress" type="ProgressContext">
+      Progress tracking utilities (available when checkpoint provider is configured)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="options" type="TaskOptions<E>">
+  Optional task configuration
+
+  <Expandable title="properties">
+    <ParamField path="id" type="string">
+      Unique task identifier for checkpointing, idempotency, and observability
+    </ParamField>
+
+    <ParamField path="timeout" type="number">
+      Task timeout in milliseconds
+    </ParamField>
+
+    <ParamField path="retry" type="'exponential' | 'linear' | 'fixed' | RetryConfig">
+      Retry configuration or preset strategy
+    </ParamField>
+
+    <ParamField path="errorClass" type="ErrorConstructor<E>">
+      Error class to wrap all errors for typed error handling
+    </ParamField>
+
+    <ParamField path="systemErrorClass" type="ErrorConstructor<E>">
+      Error class to wrap only system errors (preserves tagged errors)
+    </ParamField>
+
+    <ParamField path="dedupe" type="string | symbol">
+      Deduplication key - tasks with same key share results while in-flight
+    </ParamField>
+
+    <ParamField path="memo" type="{ key: string | symbol; ttl: number }">
+      Memoization config - cache successful results for TTL milliseconds
+    </ParamField>
+
+    <ParamField path="idempotency" type="{ key: string | (() => string); ttl?: number }">
+      Idempotency config - persist results across executions (requires persistence provider)
+    </ParamField>
+
+    <ParamField path="worker" type="boolean">
+      Execute task in worker thread for CPU-intensive operations
+    </ParamField>
+
+    <ParamField path="checkpoint" type="CheckpointConfig">
+      Checkpoint configuration for long-running tasks
+    </ParamField>
+
+    <ParamField path="otel" type="{ name?: string; attributes?: Record<string, unknown> }">
+      OpenTelemetry tracing configuration
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="task" type="Task<Result<E, T>>">
+  A Task instance that resolves to a Result tuple `[error, value]`
+</ResponseField>
+
+### parallel()
+
+Run multiple tasks in parallel with optional concurrency limit and progress tracking.
+
+```typescript
+const results = await s.parallel([
+  async () => fetchUser(1),
+  async () => fetchUser(2),
+  async () => fetchUser(3)
+], {
+  concurrency: 2,
+  onProgress: (completed, total, result) => {
+    console.log(`${completed}/${total} completed`)
+  },
+  continueOnError: true
+})
+
+// results is [Result<E, User>, Result<E, User>, Result<E, User>]
+```
+
+<ParamField path="factories" type="(() => Promise<T>)[]" required>
+  Array of factory functions that create promises
+</ParamField>
+
+<ParamField path="options" type="ParallelOptions">
+  <Expandable title="properties">
+    <ParamField path="concurrency" type="number">
+      Maximum number of concurrent tasks (0 = unlimited)
+    </ParamField>
+
+    <ParamField path="onProgress" type="(completed: number, total: number, result: Result<E, T>) => void">
+      Progress callback invoked after each task completes
+    </ParamField>
+
+    <ParamField path="continueOnError" type="boolean">
+      If true, continue executing remaining tasks even if one fails. Default: false
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="results" type="Result<E, T>[]">
+  Array of Result tuples, one per factory function
+</ResponseField>
+
+### race()
+
+Race multiple tasks against each other - first to settle wins.
+
+```typescript
+const [err, result] = await s.race([
+  async () => fetchFromPrimary(),
+  async () => fetchFromBackup(),
+  async () => fetchFromFallback()
+], {
+  requireSuccess: true,  // Only successful results count as winners
+  timeout: 5000,         // Fail if no winner within 5s
+  concurrency: 2         // Only start 2 tasks at a time
+})
+```
+
+<ParamField path="factories" type="(() => Promise<T>)[]" required>
+  Array of factory functions to race
+</ParamField>
+
+<ParamField path="options" type="RaceOptions">
+  <Expandable title="properties">
+    <ParamField path="requireSuccess" type="boolean">
+      If true, only successful results count as winners. Default: false
+    </ParamField>
+
+    <ParamField path="timeout" type="number">
+      Optional timeout in milliseconds
+    </ParamField>
+
+    <ParamField path="concurrency" type="number">
+      Optional concurrency limit
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="result" type="Result<E, T>">
+  Result of the winning task
+</ResponseField>
+
+### channel()
+
+Create a Go-style buffered channel for concurrent communication.
+
+```typescript
+const ch = s.channel<string>(10)  // Buffer capacity of 10
+
+// Producer
+s.task(async () => {
+  for (const item of items) {
+    await ch.send(item)
+  }
+  ch.close()
+})
+
+// Consumer
+for await (const item of ch) {
+  await process(item)
+}
+```
+
+<ParamField path="capacity" type="number">
+  Buffer capacity. Default: 0 (unbuffered)
+</ParamField>
+
+<ParamField path="options" type="ChannelOptions<T>">
+  <Expandable title="properties">
+    <ParamField path="backpressure" type="'block' | 'drop-oldest' | 'drop-latest' | 'error' | 'sample'">
+      Backpressure strategy. Default: 'block'
+    </ParamField>
+
+    <ParamField path="onDrop" type="(value: T) => void">
+      Callback when value is dropped due to backpressure
+    </ParamField>
+
+    <ParamField path="sampleWindow" type="number">
+      Time window for 'sample' strategy. Default: 1000ms
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="channel" type="Channel<T>">
+  A new Channel instance
+</ResponseField>
+
+### broadcast()
+
+Create a broadcast channel for pub/sub patterns. Unlike regular channels, all subscribers receive every message.
+
+```typescript
+const bc = s.broadcast<string>()
+
+// Subscribe multiple consumers
+s.task(async () => {
+  for await (const msg of bc.subscribe()) {
+    console.log('Consumer 1:', msg)
+  }
+})
+
+s.task(async () => {
+  for await (const msg of bc.subscribe()) {
+    console.log('Consumer 2:', msg)
+  }
+})
+
+// Publish messages
+await bc.send('hello')
+await bc.send('world')
+bc.close()
+```
+
+<ResponseField name="broadcast" type="BroadcastChannel<T>">
+  A new BroadcastChannel instance
+</ResponseField>
+
+### semaphore()
+
+Create a semaphore for rate limiting concurrent access.
+
+```typescript
+const sem = s.semaphore(3)  // Max 3 concurrent operations
+
+await sem.acquire(async () => {
+  // Critical section - at most 3 concurrent
+  await heavyOperation()
+})
+```
+
+<ParamField path="initialPermits" type="number" required>
+  Number of available permits
+</ParamField>
+
+<ResponseField name="semaphore" type="Semaphore">
+  A new Semaphore instance
+</ResponseField>
+
+### pool()
+
+Create a resource pool for managing connections, workers, or other resources.
+
+```typescript
+const pool = s.pool({
+  create: () => createDatabaseConnection(),
+  destroy: (conn) => conn.close(),
+  min: 2,
+  max: 10,
+  acquireTimeout: 5000,
+  healthCheck: async (conn) => {
+    try {
+      await conn.query('SELECT 1')
+      return { healthy: true }
+    } catch {
+      return { healthy: false }
+    }
+  },
+  healthCheckInterval: 30000
+})
+
+// Acquire and use
+const conn = await pool.acquire()
+try {
+  await conn.query('SELECT * FROM users')
+} finally {
+  await pool.release(conn)
+}
+
+// Or use execute() for automatic release
+await pool.execute(async (conn) => {
+  return conn.query('SELECT * FROM users')
+})
+```
+
+<ParamField path="options" type="ResourcePoolOptions<T>" required>
+  <Expandable title="properties">
+    <ParamField path="create" type="() => Promise<T>" required>
+      Factory function to create resources
+    </ParamField>
+
+    <ParamField path="destroy" type="(resource: T) => Promise<void> | void" required>
+      Cleanup function to destroy resources
+    </ParamField>
+
+    <ParamField path="min" type="number">
+      Minimum pool size. Default: 0
+    </ParamField>
+
+    <ParamField path="max" type="number" required>
+      Maximum pool size
+    </ParamField>
+
+    <ParamField path="acquireTimeout" type="number">
+      Maximum wait time for resource acquisition. Default: 30000ms
+    </ParamField>
+
+    <ParamField path="healthCheck" type="(resource: T) => Promise<{ healthy: boolean; message?: string }>">
+      Optional health check function
+    </ParamField>
+
+    <ParamField path="healthCheckInterval" type="number">
+      Interval between health checks. Default: 30000ms
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="pool" type="ResourcePool<T>">
+  A new ResourcePool instance
+</ResponseField>
+
+## Dependency Injection
+
+### provide()
+
+Provide a service to the scope, making it available to all tasks.
+
+```typescript
+const s = scope()
+  .provide('database', new Database())
+  .provide('logger', new Logger())
+
+const t = s.task(async ({ services }) => {
+  const db = services.database
+  const logger = services.logger
+  // Use services...
+})
+```
+
+<ParamField path="key" type="string" required>
+  Service key
+</ParamField>
+
+<ParamField path="value" type="T | (() => T)" required>
+  Service value or factory function
+</ParamField>
+
+<ParamField path="dispose" type="(value: T) => void | Promise<void>">
+  Optional cleanup function called when scope is disposed
+</ParamField>
+
+<ResponseField name="scope" type="Scope<Services & Record<K, T>>">
+  The scope with the new service added
+</ResponseField>
+
+### use()
+
+Retrieve a service from the scope.
+
+```typescript
+const db = s.use('database')
+```
+
+<ParamField path="key" type="keyof Services" required>
+  Service key to retrieve
+</ParamField>
+
+<ResponseField name="value" type="Services[K]">
+  The service value
+</ResponseField>
+
+### has()
+
+Check if a service exists in the scope.
+
+```typescript
+if (s.has('database')) {
+  const db = s.use('database')
+}
+```
+
+<ParamField path="key" type="keyof Services" required>
+  Service key to check
+</ParamField>
+
+<ResponseField name="exists" type="boolean">
+  True if the service exists
+</ResponseField>
+
+### override()
+
+Override an existing service with a new value.
+
+```typescript
+const s = scope()
+  .provide('database', new Database())
+  .override('database', new MockDatabase())
+```
+
+<ParamField path="key" type="keyof Services" required>
+  Service key to override
+</ParamField>
+
+<ParamField path="value" type="Services[K] | (() => Services[K])" required>
+  New service value or factory
+</ParamField>
+
+<ParamField path="dispose" type="(value: Services[K]) => void | Promise<void>">
+  Optional cleanup function
+</ParamField>
+
+<ResponseField name="scope" type="Scope<Services>">
+  The scope with the service overridden
+</ResponseField>
+
+## Rate Limiting
+
+### debounce()
+
+Create a debounced function that delays execution.
+
+```typescript
+const search = s.debounce(async (query: string) => {
+  return await api.search(query)
+}, { wait: 300 })
+
+// Multiple calls within 300ms - only last one executes
+await search('a')
+await search('ab')
+await search('abc')  // Only this executes
+```
+
+<ParamField path="fn" type="(...args: Args) => Promise<T>" required>
+  Function to debounce
+</ParamField>
+
+<ParamField path="options" type="DebounceOptions">
+  <Expandable title="properties">
+    <ParamField path="wait" type="number">
+      Wait time in milliseconds. Default: 300
+    </ParamField>
+
+    <ParamField path="leading" type="boolean">
+      Trigger on leading edge. Default: false
+    </ParamField>
+
+    <ParamField path="trailing" type="boolean">
+      Trigger on trailing edge. Default: true
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="debounced" type="(...args: Args) => Promise<Result<E, T>>">
+  Debounced function that returns a Result tuple
+</ResponseField>
+
+### throttle()
+
+Create a throttled function that executes at most once per interval.
+
+```typescript
+const save = s.throttle(async (data: string) => {
+  await api.save(data)
+}, { interval: 1000 })
+
+// Multiple calls - executes at most once per second
+await save('data1')
+await save('data2')  // Throttled
+await save('data3')  // Throttled
+```
+
+<ParamField path="fn" type="(...args: Args) => Promise<T>" required>
+  Function to throttle
+</ParamField>
+
+<ParamField path="options" type="ThrottleOptions">
+  <Expandable title="properties">
+    <ParamField path="interval" type="number">
+      Interval in milliseconds. Default: 300
+    </ParamField>
+
+    <ParamField path="leading" type="boolean">
+      Trigger on leading edge. Default: true
+    </ParamField>
+
+    <ParamField path="trailing" type="boolean">
+      Trigger on trailing edge. Default: false
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="throttled" type="(...args: Args) => Promise<Result<E, T>>">
+  Throttled function that returns a Result tuple
+</ResponseField>
+
+### poll()
+
+Create a polling operation that executes a function at regular intervals.
+
+```typescript
+const controller = s.poll(
+  async (signal) => {
+    const status = await api.getStatus()
+    return status
+  },
+  (status) => {
+    console.log('Status:', status)
+  },
+  { interval: 5000, immediate: true }
+)
+
+// Control polling
+controller.stop()
+controller.start()
+
+const { running, pollCount } = controller.status()
+```
+
+<ParamField path="fn" type="(signal: AbortSignal) => Promise<T>" required>
+  Function to poll
+</ParamField>
+
+<ParamField path="onValue" type="(value: T) => void | Promise<void>" required>
+  Callback for each polled value
+</ParamField>
+
+<ParamField path="options" type="PollOptions">
+  <Expandable title="properties">
+    <ParamField path="interval" type="number">
+      Poll interval in milliseconds. Default: 5000
+    </ParamField>
+
+    <ParamField path="immediate" type="boolean">
+      Run immediately on start. Default: true
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="controller" type="PollController">
+  Poll controller with start(), stop(), and status() methods
+</ResponseField>
+
+## Utilities
+
+### select()
+
+Go-style select statement for channel operations.
+
+```typescript
+const ch1 = s.channel<string>()
+const ch2 = s.channel<number>()
+
+const [err, result] = await s.select(
+  new Map([
+    [ch1, async (value) => `Got string: ${value}`],
+    [ch2, async (value) => `Got number: ${value}`]
+  ]),
+  { timeout: 5000 }
+)
+```
+
+<ParamField path="cases" type="Map<Channel<T>, (value: T) => Promise<R>>" required>
+  Map of channels to handler functions
+</ParamField>
+
+<ParamField path="options" type="SelectOptions">
+  <Expandable title="properties">
+    <ParamField path="timeout" type="number">
+      Timeout in milliseconds
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="result" type="Result<Error, R>">
+  Result of the first channel to receive a value
+</ResponseField>
+
+### createChild()
+
+Create a child scope that inherits from this scope.
+
+```typescript
+const parent = scope({ name: 'parent' })
+  .provide('config', config)
+
+const child = parent.createChild({ 
+  name: 'child',
+  timeout: 5000 
+})
+
+// Child has access to parent's services
+const t = child.task(async ({ services }) => {
+  const config = services.config  // Inherited from parent
+})
+```
+
+<ParamField path="options" type="ScopeOptions">
+  Child scope options (same as scope() options)
+</ParamField>
+
+<ResponseField name="child" type="Scope<ParentServices & ChildServices>">
+  New child scope
+</ResponseField>
+
+### onDispose()
+
+Register a cleanup callback to run when the scope is disposed.
+
+```typescript
+s.onDispose(() => {
+  console.log('Scope disposed')
+  cleanup()
+})
+```
+
+<ParamField path="fn" type="() => void | Promise<void>" required>
+  Cleanup function
+</ParamField>
+
+### onBeforeTask()
+
+Register a callback to run before each task starts.
+
+```typescript
+s.onBeforeTask((name, index, options) => {
+  console.log(`Starting task ${name} (#${index})`)
+})
+```
+
+<ParamField path="fn" type="(name: string, index: number, options?: TaskOptions) => void" required>
+  Callback function
+</ParamField>
+
+### onAfterTask()
+
+Register a callback to run after each task completes.
+
+```typescript
+s.onAfterTask((name, duration, error, index) => {
+  if (error) {
+    console.log(`Task ${name} failed after ${duration}ms`)
+  } else {
+    console.log(`Task ${name} succeeded in ${duration}ms`)
+  }
+})
+```
+
+<ParamField path="fn" type="(name: string, duration: number, error?: unknown, index?: number) => void" required>
+  Callback function
+</ParamField>
+
+### debugTree()
+
+Generate a visual tree representation of the scope hierarchy.
+
+```typescript
+const parent = scope({ name: 'root' })
+const child = parent.createChild({ name: 'child' })
+const grandchild = child.createChild({ name: 'grandchild' })
+
+console.log(parent.debugTree())
+// Output:
+// 📦 root (id: 1)
+//    ├─ 📦 child (id: 2)
+//    │  └─ 📦 grandchild (id: 3)
+
+console.log(parent.debugTree({ format: 'mermaid' }))
+// Output: Mermaid diagram syntax
+```
+
+<ParamField path="options" type="DebugTreeOptions">
+  <Expandable title="properties">
+    <ParamField path="format" type="'ascii' | 'mermaid'">
+      Output format. Default: 'ascii'
+    </ParamField>
+
+    <ParamField path="includeStats" type="boolean">
+      Include statistics (tasks, concurrency). Default: true
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="tree" type="string">
+  Tree representation as a string
+</ResponseField>
+
+## Properties
+
+### signal
+
+The AbortSignal for this scope. Becomes aborted when the scope is disposed or times out.
+
+```typescript
+const signal = s.signal
+if (signal.aborted) {
+  console.log('Scope is aborted')
+}
+```
+
+<ResponseField name="signal" type="AbortSignal">
+  The scope's AbortSignal
+</ResponseField>
+
+### isDisposed
+
+Whether the scope has been disposed.
+
+```typescript
+if (s.isDisposed) {
+  console.log('Scope is disposed')
+}
+```
+
+<ResponseField name="isDisposed" type="boolean">
+  True if disposed
+</ResponseField>
+
+### scopeName
+
+The name of the scope.
+
+```typescript
+console.log(s.scopeName)  // "my-scope"
+```
+
+<ResponseField name="scopeName" type="string">
+  Scope name
+</ResponseField>
+
+### concurrency
+
+The concurrency limit for this scope, or undefined if unlimited.
+
+```typescript
+const limit = s.concurrency  // 10 or undefined
+```
+
+<ResponseField name="concurrency" type="number | undefined">
+  Concurrency limit
+</ResponseField>
+
+### traceId
+
+The trace ID for log correlation (if logCorrelation is enabled).
+
+```typescript
+const s = scope({ logCorrelation: true })
+console.log(s.traceId)  // "abc123..."
+```
+
+<ResponseField name="traceId" type="string | undefined">
+  Trace ID for distributed tracing
+</ResponseField>
+
+### spanId
+
+The span ID for log correlation (if logCorrelation is enabled).
+
+```typescript
+const s = scope({ logCorrelation: true })
+console.log(s.spanId)  // "def456..."
+```
+
+<ResponseField name="spanId" type="string | undefined">
+  Span ID for distributed tracing
+</ResponseField>
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const t = s.task(async ({ signal }) => {
+  // Do work...
+  return 'result'
+})
+
+const [err, result] = await t
+if (err) {
+  console.error('Task failed:', err)
+} else {
+  console.log('Task succeeded:', result)
+}
+// Scope automatically disposed here
+```
+
+### With Services
+
+```typescript
+class Database {
+  async query(sql: string) { /* ... */ }
+}
+
+class Logger {
+  log(msg: string) { console.log(msg) }
+}
+
+await using s = scope()
+  .provide('db', new Database())
+  .provide('logger', new Logger())
+
+const t = s.task(async ({ services }) => {
+  const { db, logger } = services
+  logger.log('Querying database')
+  const result = await db.query('SELECT * FROM users')
+  return result
+})
+```
+
+### With Concurrency Limit
+
+```typescript
+await using s = scope({ concurrency: 3 })
+
+// Only 3 tasks run concurrently
+const results = await s.parallel([
+  async () => fetchUser(1),
+  async () => fetchUser(2),
+  async () => fetchUser(3),
+  async () => fetchUser(4),
+  async () => fetchUser(5)
+])
+```
+
+### With Circuit Breaker
+
+```typescript
+await using s = scope({
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeout: 30000,
+    onOpen: (failures) => {
+      console.log(`Circuit opened after ${failures} failures`)
+    }
+  }
+})
+
+// All tasks protected by circuit breaker
+for (let i = 0; i < 10; i++) {
+  const [err, result] = await s.task(() => unreliableApi())
+  if (err) {
+    console.error('API call failed:', err)
+  }
+}
+```
+
+### With Checkpointing
+
+```typescript
+import { FileCheckpointProvider } from './checkpoint-provider'
+
+await using s = scope({
+  persistence: {
+    checkpoint: new FileCheckpointProvider('./checkpoints')
+  }
+})
+
+const [err, result] = await s.task(
+  async ({ checkpoint, progress }) => {
+    const items = await loadItems()
+    let processed = checkpoint?.data?.processed ?? 0
+    
+    for (let i = processed; i < items.length; i++) {
+      await processItem(items[i])
+      progress.update((i / items.length) * 100)
+      
+      if (i % 100 === 0) {
+        await checkpoint.save({ processed: i })
+      }
+    }
+    
+    return { total: items.length }
+  },
+  {
+    id: 'batch-job',
+    checkpoint: {
+      interval: 60000,
+      onCheckpoint: (cp) => console.log(`Saved checkpoint ${cp.sequence}`)
+    }
+  }
+)
+```
+
+### Parent-Child Scopes
+
+```typescript
+await using parent = scope({ name: 'parent' })
+  .provide('config', { apiUrl: 'https://api.example.com' })
+
+// Create child scope
+const child = parent.createChild({ 
+  name: 'child',
+  timeout: 5000 
+})
+
+// Child has access to parent services
+const t = child.task(async ({ services }) => {
+  const config = services.config
+  // Use inherited config...
+})
+
+// When parent is disposed, child is also disposed
+```

@@ -1,0 +1,423 @@
+---
+title: 'MySQL Adapter'
+description: 'MySQL/MariaDB persistence adapter for distributed locks, circuit breaker state, and caching'
+---
+
+## Overview
+
+The MySQL persistence adapter provides distributed locks, circuit breaker state management, caching, and checkpoint support using MySQL or MariaDB as the backend. It uses application-level locks with TTL tracking and InnoDB storage engine for ACID guarantees.
+
+## Installation
+
+```bash
+npm install @go-go-scope/persistence-mysql mysql2
+```
+
+## Features
+
+- **Distributed Locks**: Application-level locks with TTL and automatic expiration
+- **Circuit Breaker State**: Persistent failure tracking with JSON storage
+- **Caching**: Database-backed cache with TTL support
+- **Checkpoints**: Full checkpoint support for task recovery
+- **Idempotency**: Prevent duplicate operations (via `MySQLIdempotencyAdapter`)
+- **Auto Schema**: Automatic table creation with InnoDB engine
+- **Transactional Safety**: ACID guarantees for lock operations
+- **MariaDB Compatible**: Works with both MySQL and MariaDB
+
+## Basic Usage
+
+<CodeGroup>
+
+```typescript Basic Setup
+import { createPool } from 'mysql2/promise'
+import { MySQLAdapter } from '@go-go-scope/persistence-mysql'
+import { scope } from 'go-go-scope'
+
+const pool = createPool({
+  uri: process.env.DATABASE_URL,
+})
+
+const persistence = new MySQLAdapter(pool, { keyPrefix: 'myapp:' })
+
+// Initialize tables
+await persistence.connect()
+
+await using s = scope({ persistence })
+```
+
+```typescript With Lock
+import { createPool } from 'mysql2/promise'
+import { MySQLAdapter } from '@go-go-scope/persistence-mysql'
+import { scope } from 'go-go-scope'
+
+const pool = createPool({
+  host: 'localhost',
+  user: 'root',
+  password: process.env.MYSQL_PASSWORD,
+  database: 'myapp',
+})
+
+const persistence = new MySQLAdapter(pool)
+await persistence.connect()
+
+await using s = scope({ persistence })
+
+// Acquire a distributed lock with 30 second TTL
+const lock = await s.acquireLock('resource:123', 30000)
+if (!lock) {
+  throw new Error('Could not acquire lock')
+}
+
+try {
+  // Do work with exclusive access
+  await processResource()
+} finally {
+  await lock.release()
+}
+```
+
+```typescript With Checkpoints
+import { createPool } from 'mysql2/promise'
+import { MySQLAdapter } from '@go-go-scope/persistence-mysql'
+import { scope } from 'go-go-scope'
+
+const pool = createPool({ uri: process.env.DATABASE_URL })
+const persistence = new MySQLAdapter(pool)
+
+await persistence.connect()
+
+await using s = scope({ persistence })
+
+// Save checkpoint during long-running task
+const taskId = 'import-users-2024'
+let processed = 0
+
+for (const batch of userBatches) {
+  await processBatch(batch)
+  processed += batch.length
+  
+  // Save checkpoint
+  await persistence.save({
+    id: `${taskId}:${Date.now()}`,
+    taskId,
+    sequence: processed,
+    timestamp: Date.now(),
+    progress: Math.floor((processed / totalUsers) * 100),
+    data: { lastUserId: batch[batch.length - 1].id },
+  })
+}
+```
+
+</CodeGroup>
+
+## Configuration
+
+<ParamField path="pool" type="Pool" required>
+  mysql2 Pool instance for MySQL connections
+</ParamField>
+
+<ParamField path="options" type="PersistenceAdapterOptions">
+  Configuration options
+  
+  <Expandable title="properties">
+    <ParamField path="keyPrefix" type="string">
+      Prefix for all database keys (e.g., `'myapp:'`). Useful for namespace isolation.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Database Schema
+
+The adapter automatically creates the following tables on `connect()`:
+
+### go_goscope_locks
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_locks (
+  `key` VARCHAR(255) PRIMARY KEY,
+  owner VARCHAR(255) NOT NULL,
+  expires_at DATETIME NOT NULL,
+  INDEX idx_expires (expires_at)
+) ENGINE=InnoDB;
+```
+
+### go_goscope_circuit
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_circuit (
+  `key` VARCHAR(255) PRIMARY KEY,
+  state VARCHAR(20) NOT NULL,
+  failure_count INT NOT NULL DEFAULT 0,
+  last_failure_time DATETIME,
+  last_success_time DATETIME,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_updated (updated_at)
+) ENGINE=InnoDB;
+```
+
+### go_goscope_cache
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_cache (
+  `key` VARCHAR(255) PRIMARY KEY,
+  value JSON NOT NULL,
+  expires_at DATETIME,
+  INDEX idx_expires (expires_at)
+) ENGINE=InnoDB;
+```
+
+### go_goscope_checkpoints
+
+```sql
+CREATE TABLE IF NOT EXISTS go_goscope_checkpoints (
+  id VARCHAR(255) PRIMARY KEY,
+  task_id VARCHAR(255) NOT NULL,
+  sequence INT NOT NULL,
+  timestamp BIGINT NOT NULL,
+  progress INT NOT NULL DEFAULT 0,
+  data JSON NOT NULL,
+  estimated_time_remaining BIGINT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_checkpoints_task (task_id),
+  INDEX idx_checkpoints_sequence (task_id, sequence)
+) ENGINE=InnoDB;
+```
+
+## Lock Provider Methods
+
+### acquire(key, ttl, owner?)
+
+Acquires a distributed lock with automatic TTL-based expiration. Uses transactions with `FOR UPDATE` for strong consistency.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  Time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string">
+  Optional lock owner identifier (auto-generated if not provided)
+</ParamField>
+
+**Returns:** `Promise<LockHandle | null>` - Lock handle or null if already locked
+
+### extend(key, ttl, owner)
+
+Extends the TTL of an existing lock.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+<ParamField path="ttl" type="number" required>
+  New time-to-live in milliseconds
+</ParamField>
+
+<ParamField path="owner" type="string" required>
+  Lock owner identifier
+</ParamField>
+
+**Returns:** `Promise<boolean>` - True if extended successfully
+
+### forceRelease(key)
+
+Forces release of a lock regardless of owner.
+
+<ParamField path="key" type="string" required>
+  Lock identifier
+</ParamField>
+
+## Cache Provider Methods
+
+### get(key)
+
+Retrieves a cached value using JSON storage.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+**Returns:** `Promise<T | null>` - Cached value or null if not found/expired
+
+### set(key, value, ttl?)
+
+Stores a value in the cache using JSON.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+<ParamField path="value" type="T" required>
+  Value to cache (must be JSON-serializable)
+</ParamField>
+
+<ParamField path="ttl" type="number">
+  Time-to-live in milliseconds (optional)
+</ParamField>
+
+### delete(key)
+
+Removes a cached value.
+
+<ParamField path="key" type="string" required>
+  Cache key
+</ParamField>
+
+### clear()
+
+Clears all cached values (respects key prefix if set).
+
+### keys(pattern?)
+
+Lists all cache keys matching an optional pattern.
+
+<ParamField path="pattern" type="string">
+  Optional pattern with wildcards (e.g., `'user:*'`)
+</ParamField>
+
+**Returns:** `Promise<string[]>` - Array of matching keys
+
+## Checkpoint Provider Methods
+
+### save(checkpoint)
+
+Saves a checkpoint for task recovery.
+
+<ParamField path="checkpoint" type="Checkpoint<T>" required>
+  Checkpoint data including taskId, sequence, progress, and data
+</ParamField>
+
+### load(checkpointId)
+
+Loads a specific checkpoint by ID.
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint identifier
+</ParamField>
+
+**Returns:** `Promise<Checkpoint<T> | undefined>`
+
+### loadLatest(taskId)
+
+Loads the most recent checkpoint for a task.
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+**Returns:** `Promise<Checkpoint<T> | undefined>`
+
+### list(taskId)
+
+Lists all checkpoints for a task.
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+**Returns:** `Promise<Checkpoint<unknown>[]>`
+
+### cleanup(taskId, keepCount)
+
+Deletes old checkpoints, keeping only the most recent N.
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+<ParamField path="keepCount" type="number" required>
+  Number of checkpoints to keep
+</ParamField>
+
+### deleteAll(taskId)
+
+Deletes all checkpoints for a task.
+
+<ParamField path="taskId" type="string" required>
+  Task identifier
+</ParamField>
+
+## Connection Example
+
+```typescript
+import { createPool } from 'mysql2/promise'
+import { MySQLAdapter } from '@go-go-scope/persistence-mysql'
+
+const pool = createPool({
+  host: process.env.MYSQL_HOST || 'localhost',
+  port: parseInt(process.env.MYSQL_PORT || '3306'),
+  database: process.env.MYSQL_DATABASE || 'myapp',
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASSWORD,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+})
+
+const persistence = new MySQLAdapter(pool, {
+  keyPrefix: 'myapp:',
+})
+
+// Initialize tables
+await persistence.connect()
+
+// Use with scope
+await using s = scope({ persistence })
+
+// Cleanup
+await persistence.disconnect()
+```
+
+## Best Practices
+
+<Tip>
+  Call `connect()` once at application startup to create tables. The adapter uses `IF NOT EXISTS` so it's safe to call multiple times.
+</Tip>
+
+<Warning>
+  The adapter uses client-side time for lock expiration to avoid clock skew issues. Ensure servers are synchronized via NTP.
+</Warning>
+
+<Note>
+  Lock acquisition uses `FOR UPDATE` which provides strong consistency. The adapter automatically cleans up expired locks on each `acquire()` call.
+</Note>
+
+## MariaDB Compatibility
+
+The adapter is fully compatible with MariaDB. The schema uses standard SQL features supported by both MySQL 8.0+ and MariaDB 10.5+.
+
+```typescript
+import { createPool } from 'mysql2/promise'
+import { MySQLAdapter } from '@go-go-scope/persistence-mysql'
+
+const pool = createPool({
+  host: 'mariadb.example.com',
+  user: 'myapp',
+  password: process.env.MARIADB_PASSWORD,
+  database: 'myapp',
+})
+
+const persistence = new MySQLAdapter(pool)
+await persistence.connect()
+```
+
+## Performance Considerations
+
+- Lock operations use transactions with row-level locking
+- InnoDB engine provides ACID guarantees
+- JSON columns require MySQL 5.7+ or MariaDB 10.2+
+- Connection pooling is handled by the mysql2 Pool
+- Indexes on `expires_at` optimize cleanup queries
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="PostgreSQL Adapter" icon="database" href="/api/persistence/postgres">
+    PostgreSQL-based persistence
+  </Card>
+  <Card title="SQLite Adapter" icon="database" href="/api/persistence/sqlite">
+    SQLite-based persistence
+  </Card>
+</CardGroup>

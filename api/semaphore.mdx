@@ -1,0 +1,563 @@
+---
+title: 'Semaphore'
+description: 'Rate limiting primitive for controlling concurrent access'
+---
+
+## Overview
+
+The `Semaphore` class provides a counting semaphore for limiting concurrent access to resources. It maintains a pool of permits that tasks can acquire and release.
+
+<Info>
+For most use cases, use `scope({ concurrency: n })` instead of creating a Semaphore directly. This automatically applies concurrency limits to all tasks in the scope.
+</Info>
+
+## Creation
+
+Semaphores are created using `scope.semaphore()`:
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+// Create semaphore with 3 permits
+const sem = s.semaphore(3)
+
+// At most 3 tasks can hold permits concurrently
+```
+
+<ParamField path="initialPermits" type="number" required>
+  Number of available permits
+</ParamField>
+
+<ResponseField name="semaphore" type="Semaphore">
+  A new Semaphore instance
+</ResponseField>
+
+## Core Methods
+
+### acquire()
+
+Acquire a permit and execute a function. Automatically releases permit when done.
+
+```typescript
+const sem = s.semaphore(3)
+
+// At most 3 of these will run concurrently
+const result = await sem.acquire(async () => {
+  // Critical section - limited concurrency
+  return await heavyOperation()
+})
+```
+
+<ParamField path="fn" type="() => Promise<T>" required>
+  Function to execute with acquired permit
+</ParamField>
+
+<ResponseField name="result" type="Promise<T>">
+  Result of the function
+</ResponseField>
+
+<Note>
+The permit is automatically released even if the function throws an error.
+</Note>
+
+### execute()
+
+Alias for `acquire()`. Same behavior.
+
+```typescript
+const result = await sem.execute(async () => {
+  return await operation()
+})
+```
+
+<ParamField path="fn" type="() => Promise<T>" required>
+  Function to execute
+</ParamField>
+
+<ResponseField name="result" type="Promise<T>">
+  Result of the function
+</ResponseField>
+
+### tryAcquire()
+
+Try to acquire a permit without blocking. Returns true if successful.
+
+```typescript
+const sem = s.semaphore(3)
+
+if (sem.tryAcquire()) {
+  try {
+    await operation()
+  } finally {
+    // Must manually release!
+    sem.release()
+  }
+} else {
+  console.log('No permits available')
+}
+```
+
+<ResponseField name="acquired" type="boolean">
+  True if permit was acquired
+</ResponseField>
+
+<Warning>
+When using `tryAcquire()`, you must manually release the permit. Consider using `tryAcquireWithFn()` instead for automatic cleanup.
+</Warning>
+
+### tryAcquireWithFn()
+
+Try to acquire a permit and execute a function. Returns undefined if no permit available.
+
+```typescript
+const sem = s.semaphore(3)
+
+const result = await sem.tryAcquireWithFn(async () => {
+  return await operation()
+})
+
+if (result === undefined) {
+  console.log('No permit available, operation skipped')
+} else {
+  console.log('Operation completed:', result)
+}
+```
+
+<ParamField path="fn" type="() => Promise<T>" required>
+  Function to execute if permit acquired
+</ParamField>
+
+<ResponseField name="result" type="Promise<T | undefined>">
+  Function result if permit was acquired, undefined otherwise
+</ResponseField>
+
+### acquireWithTimeout()
+
+Acquire a permit with a timeout. Returns false if timeout expires.
+
+```typescript
+const sem = s.semaphore(3)
+
+// Try to acquire for up to 5 seconds
+const acquired = await sem.acquireWithTimeout(5000)
+
+if (acquired) {
+  try {
+    await operation()
+  } finally {
+    // Must manually release!
+    sem.release()
+  }
+} else {
+  console.log('Timeout waiting for permit')
+}
+```
+
+<ParamField path="timeoutMs" type="number" required>
+  Timeout in milliseconds
+</ParamField>
+
+<ResponseField name="acquired" type="Promise<boolean>">
+  True if permit was acquired within timeout
+</ResponseField>
+
+<Warning>
+When using `acquireWithTimeout()`, you must manually release the permit. Consider using `acquireWithTimeoutAndFn()` instead.
+</Warning>
+
+### acquireWithTimeoutAndFn()
+
+Acquire with timeout and execute a function. Returns undefined if timeout.
+
+```typescript
+const sem = s.semaphore(3)
+
+const result = await sem.acquireWithTimeoutAndFn(5000, async () => {
+  return await operation()
+})
+
+if (result === undefined) {
+  console.log('Timeout or operation failed')
+}
+```
+
+<ParamField path="timeoutMs" type="number" required>
+  Timeout in milliseconds
+</ParamField>
+
+<ParamField path="fn" type="() => Promise<T>" required>
+  Function to execute
+</ParamField>
+
+<ResponseField name="result" type="Promise<T | undefined>">
+  Function result if successful, undefined if timeout
+</ResponseField>
+
+### bulkAcquire()
+
+Acquire multiple permits at once.
+
+```typescript
+const sem = s.semaphore(10)
+
+// Acquire 5 permits
+const result = await sem.bulkAcquire(5, async () => {
+  // Critical section with 5 permits
+  return await batchOperation()
+})
+```
+
+<ParamField path="count" type="number" required>
+  Number of permits to acquire
+</ParamField>
+
+<ParamField path="fn" type="() => Promise<T>" required>
+  Function to execute
+</ParamField>
+
+<ResponseField name="result" type="Promise<T>">
+  Function result
+</ResponseField>
+
+<Note>
+Blocks until all requested permits are available. Permits must be available atomically.
+</Note>
+
+### tryBulkAcquire()
+
+Try to acquire multiple permits without blocking.
+
+```typescript
+const sem = s.semaphore(10)
+
+if (sem.tryBulkAcquire(5)) {
+  try {
+    await batchOperation()
+  } finally {
+    // Must manually release all permits!
+    for (let i = 0; i < 5; i++) {
+      sem.release()
+    }
+  }
+}
+```
+
+<ParamField path="count" type="number" required>
+  Number of permits to try acquiring
+</ParamField>
+
+<ResponseField name="acquired" type="boolean">
+  True if all permits were acquired
+</ResponseField>
+
+## Properties
+
+### available
+
+Number of available permits.
+
+```typescript
+const sem = s.semaphore(5)
+
+console.log(sem.available)  // 5
+
+await sem.acquire(async () => {
+  console.log(sem.available)  // 4 (inside critical section)
+  await operation()
+})
+
+console.log(sem.available)  // 5 (permit released)
+```
+
+<ResponseField name="available" type="number">
+  Number of available permits
+</ResponseField>
+
+### waiting
+
+Number of tasks waiting to acquire a permit.
+
+```typescript
+const sem = s.semaphore(1)
+
+// Start 3 tasks
+const t1 = sem.acquire(async () => await sleep(1000))
+const t2 = sem.acquire(async () => await sleep(1000))
+const t3 = sem.acquire(async () => await sleep(1000))
+
+console.log(sem.waiting)  // 2 (t2 and t3 are waiting)
+
+await Promise.all([t1, t2, t3])
+
+console.log(sem.waiting)  // 0
+```
+
+<ResponseField name="waiting" type="number">
+  Number of waiting tasks
+</ResponseField>
+
+### totalPermits
+
+Total number of permits (initial capacity).
+
+```typescript
+const sem = s.semaphore(10)
+
+console.log(sem.totalPermits)  // 10
+```
+
+<ResponseField name="totalPermits" type="number">
+  Total permit capacity
+</ResponseField>
+
+## Patterns
+
+### Rate Limiting API Calls
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+// Limit to 10 concurrent API calls
+const apiLimiter = s.semaphore(10)
+
+const results = await s.parallel(
+  urls.map(url => async () => {
+    return await apiLimiter.acquire(async () => {
+      return await fetch(url)
+    })
+  })
+)
+```
+
+### Database Connection Pool
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+// Limit concurrent database queries
+const dbLimiter = s.semaphore(20)
+
+const query = async (sql: string) => {
+  return await dbLimiter.acquire(async () => {
+    const conn = await pool.getConnection()
+    try {
+      return await conn.query(sql)
+    } finally {
+      conn.release()
+    }
+  })
+}
+
+const users = await query('SELECT * FROM users')
+```
+
+### Worker Pool
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const workers = s.semaphore(4)  // 4 worker threads
+
+for (const job of jobs) {
+  s.task(async () => {
+    await workers.acquire(async () => {
+      await processJob(job)
+    })
+  })
+}
+```
+
+### Graceful Degradation
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const sem = s.semaphore(5)
+
+const processRequest = async (req: Request) => {
+  // Try to acquire permit with timeout
+  const result = await sem.tryAcquireWithFn(async () => {
+    return await expensiveOperation(req)
+  })
+  
+  if (result === undefined) {
+    // No permit available - use fallback
+    return await cheapFallback(req)
+  }
+  
+  return result
+}
+```
+
+### Batching with Semaphore
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const batchSem = s.semaphore(100)  // 100 items per batch
+
+const items: Item[] = []
+const itemsLock = s.semaphore(1)  // Mutex for items array
+
+for (const item of allItems) {
+  // Try to add to batch
+  const added = await batchSem.tryAcquireWithFn(async () => {
+    await itemsLock.acquire(async () => {
+      items.push(item)
+    })
+  })
+  
+  if (!added) {
+    // Batch is full - process it
+    await processBatch(items)
+    
+    // Reset
+    await itemsLock.acquire(async () => {
+      items.length = 0
+    })
+    
+    // Release all batch permits
+    // (In production, track this more carefully)
+  }
+}
+
+// Process remaining
+if (items.length > 0) {
+  await processBatch(items)
+}
+```
+
+### Fair Scheduling
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const fairSem = s.semaphore(1)  // Ensure fair ordering
+
+// Multiple tasks acquire in order
+const t1 = s.task(async () => {
+  await fairSem.acquire(async () => {
+    console.log('Task 1')
+  })
+})
+
+const t2 = s.task(async () => {
+  await fairSem.acquire(async () => {
+    console.log('Task 2')
+  })
+})
+
+const t3 = s.task(async () => {
+  await fairSem.acquire(async () => {
+    console.log('Task 3')
+  })
+})
+
+// Output: Task 1, Task 2, Task 3 (in order)
+await Promise.all([t1, t2, t3])
+```
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const sem = s.semaphore(3)
+
+// Run 10 tasks with max 3 concurrent
+const tasks = Array.from({ length: 10 }, (_, i) =>
+  s.task(async () => {
+    return await sem.acquire(async () => {
+      console.log(`Task ${i} started`)
+      await sleep(1000)
+      console.log(`Task ${i} finished`)
+      return i
+    })
+  })
+)
+
+const results = await Promise.all(tasks)
+```
+
+### With Scope Concurrency
+
+```typescript
+import { scope } from 'go-go-scope'
+
+// Scope-level concurrency (recommended)
+await using s = scope({ concurrency: 3 })
+
+// All tasks automatically limited to 3 concurrent
+const tasks = Array.from({ length: 10 }, (_, i) =>
+  s.task(async () => {
+    console.log(`Task ${i} started`)
+    await sleep(1000)
+    return i
+  })
+)
+
+const results = await Promise.all(tasks)
+```
+
+### Timeout Example
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const sem = s.semaphore(1)
+
+// First task holds the permit
+const t1 = sem.acquire(async () => {
+  await sleep(10000)  // Hold for 10 seconds
+})
+
+// Second task times out
+const result = await sem.acquireWithTimeoutAndFn(1000, async () => {
+  return 'success'
+})
+
+if (result === undefined) {
+  console.log('Timeout - permit not available within 1 second')
+}
+
+await t1
+```
+
+### Bulk Acquire Example
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const sem = s.semaphore(100)
+
+// Process items in batches of 10
+const batches = chunk(items, 10)
+
+for (const batch of batches) {
+  await sem.bulkAcquire(batch.length, async () => {
+    await Promise.all(batch.map(item => processItem(item)))
+  })
+}
+```

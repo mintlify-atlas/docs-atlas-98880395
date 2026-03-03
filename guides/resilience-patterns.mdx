@@ -1,0 +1,526 @@
+---
+title: "Resilience Patterns"
+description: "Circuit breakers, retries, timeouts, and fault tolerance with go-go-scope"
+---
+
+## Overview
+
+go-go-scope provides built-in resilience patterns to handle failures gracefully:
+
+- **Circuit Breakers** - Prevent cascading failures
+- **Retries** - Automatic retry with backoff strategies
+- **Timeouts** - Limit execution time
+- **Rate Limiting** - Control request rates
+
+## Circuit Breakers
+
+Circuit breakers prevent cascading failures by stopping requests to failing services.
+
+### States
+
+- **Closed** - Normal operation, requests pass through
+- **Open** - Too many failures, requests fail immediately
+- **Half-Open** - Testing if service recovered
+
+### Basic Usage
+
+```typescript
+import { scope } from 'go-go-scope';
+
+await using s = scope({
+  circuitBreaker: {
+    failureThreshold: 5,    // Open after 5 failures
+    resetTimeout: 30000,    // Try again after 30s
+    successThreshold: 2,    // Close after 2 successes in half-open
+  }
+});
+
+// All tasks in this scope use the circuit breaker
+const [err, data] = await s.task(async () => {
+  return fetch('https://unreliable-api.com/data');
+});
+
+if (err) {
+  console.error('Request failed:', err);
+}
+```
+
+### Circuit Breaker Events
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope';
+
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000,
+  onStateChange: (from, to, failures) => {
+    console.log(`Circuit ${from} → ${to} (${failures} failures)`);
+  },
+  onOpen: (failures) => {
+    console.error(`Circuit opened after ${failures} failures`);
+  },
+  onClose: () => {
+    console.log('Circuit closed - service recovered');
+  },
+  onHalfOpen: () => {
+    console.log('Circuit half-open - testing service');
+  }
+});
+
+// Execute through circuit breaker
+try {
+  const result = await cb.execute(async (signal) => {
+    return fetch('https://api.example.com', { signal });
+  });
+} catch (err) {
+  if (err.message === 'Circuit breaker is open') {
+    console.log('Service is down');
+  }
+}
+```
+
+### Advanced Features
+
+<Accordion title="Adaptive Threshold">
+Dynamically adjust failure threshold based on error rate:
+
+```typescript
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000,
+  advanced: {
+    adaptiveThreshold: true,
+    minThreshold: 2,        // Minimum threshold
+    maxThreshold: 10,       // Maximum threshold
+    errorRateWindowMs: 60000, // 1 minute window
+    onThresholdAdapt: (newThreshold, errorRate) => {
+      console.log(`Threshold adapted to ${newThreshold} (error rate: ${errorRate})`);
+    }
+  }
+});
+```
+</Accordion>
+
+<Accordion title="Sliding Window">
+Count failures within a time window instead of cumulative:
+
+```typescript
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000,
+  advanced: {
+    slidingWindow: true,
+    slidingWindowSizeMs: 60000, // 1 minute window
+  }
+});
+
+// Only failures in last 60s count toward threshold
+```
+</Accordion>
+
+<Accordion title="Event Subscription">
+Subscribe to circuit breaker events:
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 5 });
+
+// Subscribe to events
+const unsubscribe = cb.on('open', (failures) => {
+  console.log(`Circuit opened with ${failures} failures`);
+});
+
+cb.on('stateChange', (from, to, failures) => {
+  console.log(`${from} → ${to}`);
+});
+
+cb.on('thresholdAdapt', (threshold, errorRate) => {
+  console.log(`Threshold: ${threshold}, error rate: ${errorRate}`);
+});
+
+// Later: unsubscribe
+unsubscribe();
+```
+</Accordion>
+
+## Retry Strategies
+
+Automatic retry with configurable backoff algorithms:
+
+### Exponential Backoff
+
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+await using s = scope();
+
+const [err, data] = await s.task(
+  async () => unreliableAPI(),
+  {
+    retry: {
+      maxRetries: 5,
+      delay: exponentialBackoff({
+        initial: 100,      // Start at 100ms
+        max: 30000,        // Cap at 30s
+        multiplier: 2,     // Double each time
+        jitter: 0.3,       // ±30% randomness
+      }),
+      onRetry: (error, attempt) => {
+        console.log(`Retry ${attempt}: ${error.message}`);
+      }
+    }
+  }
+);
+```
+
+### Full Jitter (AWS-style)
+
+Random delay between 0 and calculated value:
+
+```typescript
+const [err, data] = await s.task(
+  async () => apiCall(),
+  {
+    retry: {
+      maxRetries: 5,
+      delay: exponentialBackoff({
+        initial: 100,
+        max: 5000,
+        fullJitter: true,  // Random between 0 and calculated delay
+      })
+    }
+  }
+);
+```
+
+### Decorrelated Jitter (Azure-style)
+
+Better for high-contention scenarios:
+
+```typescript
+import { decorrelatedJitter } from 'go-go-scope';
+
+const [err, data] = await s.task(
+  async () => apiCall(),
+  {
+    retry: {
+      maxRetries: 5,
+      delay: decorrelatedJitter({ initial: 100, max: 5000 })
+    }
+  }
+);
+```
+
+### Linear Backoff
+
+```typescript
+import { linear } from 'go-go-scope';
+
+const [err, data] = await s.task(
+  async () => apiCall(),
+  {
+    retry: {
+      maxRetries: 5,
+      delay: linear(100, 50)  // 100ms, 150ms, 200ms, 250ms, 300ms
+    }
+  }
+);
+```
+
+### Fixed Delay with Jitter
+
+```typescript
+import { jitter } from 'go-go-scope';
+
+const [err, data] = await s.task(
+  async () => apiCall(),
+  {
+    retry: {
+      maxRetries: 5,
+      delay: jitter(1000, 0.2)  // 1000ms ± 20%
+    }
+  }
+);
+```
+
+### Conditional Retry
+
+Only retry on specific errors:
+
+```typescript
+const [err, data] = await s.task(
+  async () => apiCall(),
+  {
+    retry: {
+      maxRetries: 3,
+      delay: 1000,
+      retryCondition: (error) => {
+        // Only retry on network errors or 503
+        return (
+          error instanceof NetworkError || 
+          error.status === 503
+        );
+      }
+    }
+  }
+);
+```
+
+## Timeouts
+
+Limit execution time at scope or task level:
+
+<CodeGroup>
+
+```typescript Scope Timeout
+// All tasks inherit scope timeout
+await using s = scope({ timeout: 5000 });
+
+const [err, data] = await s.task(async ({ signal }) => {
+  return fetch('https://slow-api.com', { signal });
+});
+
+if (err?.message.includes('timeout')) {
+  console.error('Request timed out');
+}
+```
+
+```typescript Task Timeout
+// Override scope timeout for specific task
+await using s = scope();
+
+const [err, data] = await s.task(
+  async ({ signal }) => fetch('https://slow-api.com', { signal }),
+  { timeout: 3000 }
+);
+```
+
+```typescript Race Timeout
+// Timeout for race operations
+import { race } from 'go-go-scope';
+
+const [err, result] = await race(
+  [async () => api1(), async () => api2()],
+  { timeout: 5000 }
+);
+```
+
+</CodeGroup>
+
+## Rate Limiting
+
+### Token Bucket
+
+Control request rates with token bucket algorithm:
+
+```typescript
+await using s = scope();
+
+const bucket = s.tokenBucket({
+  capacity: 10,      // Max 10 tokens
+  fillRate: 2,       // 2 tokens per second
+  fillInterval: 1000 // Refill every second
+});
+
+// Consume tokens before making request
+for (let i = 0; i < 20; i++) {
+  await bucket.consume(1); // Blocks if no tokens available
+  await makeRequest();
+}
+```
+
+### Semaphore
+
+Limit concurrent operations:
+
+```typescript
+await using s = scope();
+
+const sem = s.semaphore(5); // Max 5 concurrent operations
+
+const tasks = items.map(item => 
+  s.task(async () => {
+    await sem.acquire(async () => {
+      return processItem(item);
+    });
+  })
+);
+
+await Promise.all(tasks);
+```
+
+### Scope-Level Concurrency
+
+```typescript
+// Limit concurrency for all tasks in scope
+await using s = scope({ concurrency: 5 });
+
+// Only 5 tasks run concurrently
+const tasks = items.map(item => 
+  s.task(() => processItem(item))
+);
+
+await Promise.all(tasks);
+```
+
+## Combining Patterns
+
+### Circuit Breaker + Retry + Timeout
+
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+await using s = scope({
+  timeout: 10000,  // Overall timeout
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeout: 30000,
+  }
+});
+
+const [err, data] = await s.task(
+  async ({ signal }) => fetch('https://api.example.com', { signal }),
+  {
+    timeout: 5000,  // Task-specific timeout
+    retry: {
+      maxRetries: 3,
+      delay: exponentialBackoff({ initial: 100, max: 2000 })
+    }
+  }
+);
+```
+
+### Rate Limiting + Retry
+
+```typescript
+await using s = scope();
+
+const bucket = s.tokenBucket({ capacity: 10, fillRate: 2 });
+
+const [err, data] = await s.task(
+  async () => {
+    await bucket.consume(1);  // Wait for token
+    return apiCall();
+  },
+  {
+    retry: {
+      maxRetries: 3,
+      delay: exponentialBackoff({ initial: 100 })
+    }
+  }
+);
+```
+
+## Real-World Examples
+
+### Resilient API Client
+
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+class ResilientAPIClient {
+  private scope: Scope;
+  
+  constructor() {
+    this.scope = scope({
+      name: 'api-client',
+      circuitBreaker: {
+        failureThreshold: 5,
+        resetTimeout: 30000,
+        onOpen: () => console.error('API circuit opened'),
+        onClose: () => console.log('API circuit closed'),
+      },
+      concurrency: 10,  // Max 10 concurrent requests
+    });
+  }
+  
+  async get(url: string) {
+    const [err, data] = await this.scope.task(
+      async ({ signal }) => {
+        const res = await fetch(url, { signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      },
+      {
+        timeout: 5000,
+        retry: {
+          maxRetries: 3,
+          delay: exponentialBackoff({ initial: 100, max: 2000 }),
+          retryCondition: (error) => {
+            // Only retry on network errors or 5xx
+            return error.status >= 500 || error instanceof NetworkError;
+          }
+        }
+      }
+    );
+    
+    if (err) throw err;
+    return data;
+  }
+  
+  async dispose() {
+    await this.scope[Symbol.asyncDispose]();
+  }
+}
+```
+
+### Database Query with Retries
+
+```typescript
+async function queryWithRetry(sql: string) {
+  await using s = scope();
+  
+  const [err, result] = await s.task(
+    async ({ signal }) => {
+      const db = await getConnection();
+      return db.query(sql, { signal });
+    },
+    {
+      retry: {
+        maxRetries: 3,
+        delay: exponentialBackoff({ initial: 50, max: 1000 }),
+        retryCondition: (error) => {
+          // Retry on deadlock or connection errors
+          return (
+            error.code === 'DEADLOCK' || 
+            error.code === 'CONNECTION_LOST'
+          );
+        },
+        onRetry: (error, attempt) => {
+          console.log(`DB retry ${attempt}: ${error.message}`);
+        }
+      }
+    }
+  );
+  
+  if (err) throw err;
+  return result;
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Circuit Breakers" icon="shield">
+    Prevent cascading failures in distributed systems
+  </Card>
+  <Card title="Add Jitter" icon="random">
+    Use jitter in retries to avoid thundering herd
+  </Card>
+  <Card title="Set Timeouts" icon="clock">
+    Always set reasonable timeouts for external calls
+  </Card>
+  <Card title="Conditional Retries" icon="filter">
+    Only retry transient failures, not permanent errors
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Streams" icon="water" href="/guides/streams">
+    Process data streams with backpressure control
+  </Card>
+  <Card title="Scheduler" icon="calendar" href="/guides/scheduler">
+    Distributed job scheduling with fault tolerance
+  </Card>
+</CardGroup>

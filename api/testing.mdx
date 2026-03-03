@@ -1,0 +1,818 @@
+---
+title: '@go-go-scope/testing'
+description: 'Testing utilities for go-go-scope - mocks, spies, time control, and assertions'
+---
+
+# @go-go-scope/testing
+
+Comprehensive testing utilities for go-go-scope including mock scopes, spies, time control, and assertion helpers for deterministic testing.
+
+## Installation
+
+```bash
+npm install @go-go-scope/testing
+```
+
+## Quick Start
+
+```typescript
+import { createMockScope, expectTask } from '@go-go-scope/testing'
+import { describe, test, expect } from 'vitest'
+
+describe('my feature', () => {
+  test('task succeeds', async () => {
+    const s = createMockScope()
+    
+    await expectTask(s.task(() => Promise.resolve('done')))
+      .toResolveWith('done')
+  })
+})
+```
+
+## Mock Scopes
+
+### createMockScope()
+
+Create a mock scope with tracking and control capabilities.
+
+```typescript
+import { createMockScope } from '@go-go-scope/testing'
+
+const s = createMockScope({
+  autoAdvanceTimers: true,
+  deterministic: true,
+  services: { db: mockDB },
+  overrides: { logger: mockLogger }
+})
+```
+
+<ParamField path="options" type="MockScopeOptions">
+  Mock scope configuration
+</ParamField>
+
+#### MockScopeOptions
+
+<ParamField path="autoAdvanceTimers" type="boolean">
+  Automatically advance timers for async operations
+</ParamField>
+
+<ParamField path="deterministic" type="boolean">
+  Use deterministic random seeds for reproducible tests
+</ParamField>
+
+<ParamField path="services" type="Record<string, unknown>">
+  Pre-configured services to inject
+</ParamField>
+
+<ParamField path="overrides" type="Record<string, unknown>">
+  Services to override (for mocking existing services)
+</ParamField>
+
+<ParamField path="aborted" type="boolean">
+  Initial aborted state
+</ParamField>
+
+<ParamField path="abortReason" type="unknown">
+  Abort reason if aborted
+</ParamField>
+
+<ResponseField name="MockScope" type="MockScope">
+  Extended scope with mock capabilities
+</ResponseField>
+
+### MockScope Properties
+
+<ParamField path="taskCalls" type="TaskCall[]">
+  Record of task calls made to this scope
+</ParamField>
+
+<ParamField path="options" type="MockScopeOptions">
+  Options used to create this mock scope
+</ParamField>
+
+### MockScope Methods
+
+#### abort()
+
+Manually abort the scope.
+
+```typescript
+const s = createMockScope()
+s.abort(new Error('Test abort'))
+```
+
+<ParamField path="reason" type="unknown">
+  Abort reason
+</ParamField>
+
+#### getTaskCalls()
+
+Get all recorded task calls.
+
+```typescript
+const calls = s.getTaskCalls()
+console.log(`Made ${calls.length} task calls`)
+```
+
+<ResponseField name="TaskCall[]" type="TaskCall[]">
+  Array of task call records
+</ResponseField>
+
+#### clearTaskCalls()
+
+Clear recorded task calls.
+
+```typescript
+s.clearTaskCalls()
+```
+
+#### mockService()
+
+Override a service with a mock implementation.
+
+```typescript
+const s = createMockScope()
+  .mockService('db', mockDB)
+  .mockService('logger', mockLogger)
+```
+
+<ParamField path="key" type="string" required>
+  Service key
+</ParamField>
+
+<ParamField path="value" type="T" required>
+  Mock service value
+</ParamField>
+
+## Time Control
+
+### createTimeController()
+
+Create a time controller for deterministic testing.
+
+```typescript
+import { createTimeController } from '@go-go-scope/testing'
+
+const time = createTimeController()
+
+// Fast forward 10 seconds instantly
+time.advance(10000)
+
+// Run all pending timeouts
+time.runAll()
+```
+
+<ResponseField name="TimeController" type="TimeController">
+  Time manipulation controller
+</ResponseField>
+
+### TimeController Properties
+
+<ParamField path="now" type="number">
+  Current simulated time in milliseconds (read-only)
+</ParamField>
+
+### TimeController Methods
+
+#### advance()
+
+Advance time by specified amount.
+
+```typescript
+time.advance(5000) // Advance 5 seconds
+```
+
+<ParamField path="ms" type="number" required>
+  Milliseconds to advance
+</ParamField>
+
+#### jumpTo()
+
+Jump to specific absolute time.
+
+```typescript
+time.jumpTo(Date.now() + 10000)
+```
+
+<ParamField path="timestamp" type="number" required>
+  Target timestamp
+</ParamField>
+
+#### runAll()
+
+Run all pending timeouts immediately.
+
+```typescript
+time.runAll()
+```
+
+#### reset()
+
+Reset time to 0 and clear all pending timeouts.
+
+```typescript
+time.reset()
+```
+
+#### delay()
+
+Create a Promise that resolves after delay (respects time control).
+
+```typescript
+const promise = time.delay(1000)
+time.advance(1000)
+await promise // Resolves immediately
+```
+
+<ParamField path="ms" type="number" required>
+  Delay in milliseconds
+</ParamField>
+
+#### install()
+
+Install this controller as global time source.
+
+```typescript
+time.install()
+// Now Date.now(), setTimeout, etc. use controlled time
+```
+
+#### uninstall()
+
+Uninstall and restore original global time.
+
+```typescript
+time.uninstall()
+```
+
+### createTestScope()
+
+Create a scope with time control enabled.
+
+```typescript
+import { createTestScope } from '@go-go-scope/testing'
+
+const { scope, time } = await createTestScope({ timeout: 5000 })
+
+const task = scope.task(() => longOperation(), { timeout: 10000 })
+
+// Fast forward past timeout
+time.advance(10001)
+
+const [err] = await task
+expect(err?.message).toContain('timeout')
+```
+
+<ParamField path="options" type="{ timeout?: number; concurrency?: number }">
+  Scope options
+</ParamField>
+
+<ResponseField name="{ scope: Scope; time: TimeController }" type="object">
+  Scope and time controller
+</ResponseField>
+
+### createTimeTravelController()
+
+Advanced time controller with timeline inspection.
+
+```typescript
+import { createTimeTravelController } from '@go-go-scope/testing'
+
+const time = createTimeTravelController()
+
+const results: number[] = []
+time.setTimeout(() => results.push(1), 100)
+time.setTimeout(() => results.push(2), 200)
+
+// Jump to specific time
+time.jumpTo(150)
+expect(results).toEqual([1])
+
+// Continue
+time.advance(100)
+expect(results).toEqual([1, 2])
+
+// Inspect timeline
+time.printTimeline()
+```
+
+<ResponseField name="TimeTravelController" type="object">
+  Advanced time controller with history
+</ResponseField>
+
+## Assertions
+
+### expectTask()
+
+Create assertion helpers for a task.
+
+```typescript
+import { expectTask } from '@go-go-scope/testing'
+
+await expectTask(task)
+  .toResolve()
+
+await expectTask(task)
+  .toResolveWith('expected value')
+
+await expectTask(task)
+  .toReject()
+
+await expectTask(task)
+  .toRejectWith('error message')
+```
+
+<ParamField path="task" type="Task<Result<Error, T>>" required>
+  Task to assert
+</ParamField>
+
+<ResponseField name="TaskAssertion<T>" type="TaskAssertion<T>">
+  Assertion helper with chainable methods
+</ResponseField>
+
+### TaskAssertion Methods
+
+#### toResolve()
+
+Assert task resolves without error.
+
+```typescript
+await expectTask(task).toResolve()
+```
+
+#### toResolveWith()
+
+Assert task resolves with specific value.
+
+```typescript
+await expectTask(task).toResolveWith('expected')
+```
+
+<ParamField path="expected" type="T" required>
+  Expected value
+</ParamField>
+
+#### toResolveWithin()
+
+Assert task resolves within timeout.
+
+```typescript
+await expectTask(task)
+  .toResolveWithin(1000)
+  .toResolveWith('done')
+```
+
+<ParamField path="timeoutMs" type="number" required>
+  Timeout in milliseconds
+</ParamField>
+
+#### toReject()
+
+Assert task rejects with error.
+
+```typescript
+await expectTask(task).toReject()
+```
+
+#### toRejectWith()
+
+Assert task rejects with specific error message.
+
+```typescript
+await expectTask(task).toRejectWith('fail')
+await expectTask(task).toRejectWith(/error/i)
+```
+
+<ParamField path="message" type="string | RegExp" required>
+  Expected error message or pattern
+</ParamField>
+
+#### toRejectWithType()
+
+Assert task fails with specific error type.
+
+```typescript
+await expectTask(task).toRejectWithType(TypeError)
+```
+
+<ParamField path="errorClass" type="new (...args: any[]) => Error" required>
+  Error class constructor
+</ParamField>
+
+#### result()
+
+Get the result tuple for manual assertions.
+
+```typescript
+const [err, value] = await expectTask(task).result()
+```
+
+### assertResolves()
+
+Assert that a task resolves successfully.
+
+```typescript
+import { assertResolves } from '@go-go-scope/testing'
+
+const [err, result] = await assertResolves(task)
+expect(result).toBe('done')
+```
+
+<ParamField path="task" type="Task<Result<Error, T>>" required>
+  Task to assert
+</ParamField>
+
+<ResponseField name="Result<Error, T>" type="Result<Error, T>">
+  Result tuple (will throw if task rejects)
+</ResponseField>
+
+### assertRejects()
+
+Assert that a task rejects with an error.
+
+```typescript
+import { assertRejects } from '@go-go-scope/testing'
+
+const err = await assertRejects(task)
+expect(err.message).toBe('fail')
+```
+
+<ParamField path="task" type="Task<Result<Error, T>>" required>
+  Task to assert
+</ParamField>
+
+<ResponseField name="Error" type="Error">
+  Error from task (will throw if task resolves)
+</ResponseField>
+
+### assertResolvesWithin()
+
+Assert that a task resolves within a timeout.
+
+```typescript
+import { assertResolvesWithin } from '@go-go-scope/testing'
+
+const [err, result] = await assertResolvesWithin(task, 1000)
+```
+
+<ParamField path="task" type="Task<Result<Error, T>>" required>
+  Task to assert
+</ParamField>
+
+<ParamField path="timeoutMs" type="number" required>
+  Timeout in milliseconds
+</ParamField>
+
+### assertScopeDisposed()
+
+Assert that a scope has been properly disposed.
+
+```typescript
+import { assertScopeDisposed } from '@go-go-scope/testing'
+
+const s = scope()
+s.task(() => doSomething())
+
+await assertScopeDisposed(s)
+```
+
+<ParamField path="scope" type="Scope" required>
+  Scope to check
+</ParamField>
+
+## Spies
+
+### createSpy()
+
+Create a spy function for tracking calls.
+
+```typescript
+import { createSpy } from '@go-go-scope/testing'
+
+const spy = createSpy()
+  .mockReturnValue('mocked')
+
+const result = spy('arg1', 'arg2')
+
+expect(result).toBe('mocked')
+expect(spy.wasCalled()).toBe(true)
+expect(spy.wasCalledWith('arg1', 'arg2')).toBe(true)
+```
+
+<ResponseField name="Spy<TArgs, TReturn>" type="Spy<TArgs, TReturn>">
+  Spy function with tracking
+</ResponseField>
+
+### Spy Properties
+
+<ParamField path="calls" type="Array<{ args: TArgs; result: TReturn }>">
+  Record of all calls
+</ParamField>
+
+### Spy Methods
+
+#### mockImplementation()
+
+Set mock implementation.
+
+```typescript
+const spy = createSpy()
+  .mockImplementation((x: number) => x * 2)
+```
+
+<ParamField path="fn" type="(...args: TArgs) => TReturn" required>
+  Mock implementation function
+</ParamField>
+
+#### mockReturnValue()
+
+Set mock return value.
+
+```typescript
+const spy = createSpy().mockReturnValue('result')
+```
+
+<ParamField path="value" type="TReturn" required>
+  Return value
+</ParamField>
+
+#### mockReset()
+
+Reset spy state.
+
+```typescript
+spy.mockReset()
+```
+
+#### getCalls()
+
+Get all call records.
+
+```typescript
+const calls = spy.getCalls()
+```
+
+#### wasCalled()
+
+Check if spy was called.
+
+```typescript
+if (spy.wasCalled()) {
+  console.log('Spy was called')
+}
+```
+
+#### wasCalledWith()
+
+Check if spy was called with specific arguments.
+
+```typescript
+if (spy.wasCalledWith('arg1', 'arg2')) {
+  console.log('Called with expected args')
+}
+```
+
+<ParamField path="...expectedArgs" type="TArgs" required>
+  Expected arguments
+</ParamField>
+
+## Mock Channels
+
+### createMockChannel()
+
+Create a mock channel for testing.
+
+```typescript
+import { createMockChannel } from '@go-go-scope/testing'
+
+const mockCh = createMockChannel<number>()
+mockCh.setReceiveValues([1, 2, 3])
+
+const ch = mockCh.channel
+const value = await ch.receive()
+expect(value).toBe(1)
+```
+
+<ResponseField name="MockChannel<T>" type="MockChannel<T>">
+  Mock channel with control methods
+</ResponseField>
+
+### MockChannel Properties
+
+<ParamField path="channel" type="Channel<T>">
+  The channel instance
+</ParamField>
+
+<ParamField path="sentValues" type="T[]">
+  Record of sent values
+</ParamField>
+
+<ParamField path="isClosed" type="boolean">
+  Whether channel is closed
+</ParamField>
+
+### MockChannel Methods
+
+#### setReceiveValues()
+
+Set values to be received.
+
+```typescript
+mockCh.setReceiveValues([1, 2, 3])
+```
+
+#### mockReceive()
+
+Simulate receiving a value.
+
+```typescript
+mockCh.mockReceive(42)
+```
+
+#### getSentValues()
+
+Get all sent values.
+
+```typescript
+const sent = mockCh.getSentValues()
+```
+
+#### clearSentValues()
+
+Clear sent values.
+
+```typescript
+mockCh.clearSentValues()
+```
+
+#### close()
+
+Close the mock channel.
+
+```typescript
+mockCh.close()
+```
+
+#### reset()
+
+Reset to initial state.
+
+```typescript
+mockCh.reset()
+```
+
+## Utilities
+
+### flushPromises()
+
+Wait for all promises to settle.
+
+```typescript
+import { flushPromises } from '@go-go-scope/testing'
+
+const promise = s.task(async () => {
+  await delay(100)
+  return 'done'
+})
+
+await flushPromises()
+
+const [err, result] = await promise
+expect(result).toBe('done')
+```
+
+### createControlledTimer()
+
+Create a simple controlled timer environment.
+
+```typescript
+import { createControlledTimer } from '@go-go-scope/testing'
+
+const timer = createControlledTimer()
+
+timer.setTimeout(() => console.log('fired'), 1000)
+timer.advance(1000)
+```
+
+<ResponseField name="ControlledTimer" type="object">
+  Controlled timer with advance/flush methods
+</ResponseField>
+
+## Examples
+
+### Testing Timeouts
+
+```typescript
+import { createTestScope, expectTask } from '@go-go-scope/testing'
+import { describe, test, expect } from 'vitest'
+
+describe('timeout behavior', () => {
+  test('task times out', async () => {
+    const { scope, time } = await createTestScope({ timeout: 5000 })
+    
+    const task = scope.task(
+      () => new Promise(resolve => setTimeout(resolve, 10000)),
+      { timeout: 5000 }
+    )
+    
+    // Fast forward past timeout
+    time.advance(5001)
+    
+    await expectTask(task).toReject()
+  })
+})
+```
+
+### Testing Retries
+
+```typescript
+import { createMockScope } from '@go-go-scope/testing'
+
+test('task retries', async () => {
+  const s = createMockScope()
+  
+  let attempts = 0
+  const [err, result] = await s.task(() => {
+    attempts++
+    if (attempts < 3) throw new Error('fail')
+    return 'success'
+  }, { retry: { maxRetries: 3, delay: 0 } })
+  
+  expect(err).toBeUndefined()
+  expect(result).toBe('success')
+  expect(attempts).toBe(3)
+})
+```
+
+### Mocking Services
+
+```typescript
+import { createMockScope, createSpy } from '@go-go-scope/testing'
+
+test('uses injected service', async () => {
+  const mockDB = {
+    query: createSpy().mockReturnValue([{ id: 1 }])
+  }
+  
+  const s = createMockScope({ services: { db: mockDB } })
+  
+  const [err, users] = await s.task(({ services }) => {
+    return services.db.query('SELECT * FROM users')
+  })
+  
+  expect(err).toBeUndefined()
+  expect(users).toEqual([{ id: 1 }])
+  expect(mockDB.query.wasCalled()).toBe(true)
+})
+```
+
+### Testing Cancellation
+
+```typescript
+import { createMockScope } from '@go-go-scope/testing'
+
+test('cancels on scope disposal', async () => {
+  const s = createMockScope()
+  let aborted = false
+  
+  const task = s.task(({ signal }) => {
+    return new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        aborted = true
+        reject(new Error('aborted'))
+      })
+    })
+  })
+  
+  s.abort()
+  
+  const [err] = await task
+  expect(err?.message).toBe('aborted')
+  expect(aborted).toBe(true)
+})
+```
+
+### Testing Channels
+
+```typescript
+import { createMockChannel } from '@go-go-scope/testing'
+
+test('channel communication', async () => {
+  const mockCh = createMockChannel<number>()
+  mockCh.setReceiveValues([1, 2, 3])
+  
+  const ch = mockCh.channel
+  
+  await ch.send(10)
+  await ch.send(20)
+  
+  expect(mockCh.getSentValues()).toEqual([10, 20])
+  
+  const values: number[] = []
+  for await (const value of ch) {
+    values.push(value)
+  }
+  
+  expect(values).toEqual([1, 2, 3])
+})
+```

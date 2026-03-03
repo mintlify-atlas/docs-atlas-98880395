@@ -1,0 +1,346 @@
+---
+title: Building Web APIs with Framework Adapters
+description: Learn how to integrate go-go-scope with popular web frameworks like Fastify, Express, and NestJS for request-scoped concurrency
+---
+
+# Building Web APIs with Framework Adapters
+
+go-go-scope provides framework adapters for seamless integration with popular Node.js web frameworks. Each request gets its own scope with automatic cleanup and cancellation support.
+
+## Fastify Integration
+
+Fastify plugin provides request-scoped structured concurrency with automatic cleanup.
+
+<Steps>
+  <Step title="Install the adapter">
+    ```bash
+    npm install @go-go-scope/adapter-fastify
+    ```
+  </Step>
+
+  <Step title="Register the plugin">
+    ```typescript
+    import fastify from 'fastify'
+    import { fastifyGoGoScope } from '@go-go-scope/adapter-fastify'
+
+    const app = fastify()
+
+    // Register plugin with optional timeout
+    await app.register(fastifyGoGoScope, {
+      name: 'my-api',
+      timeout: 30000  // 30 second default timeout for all requests
+    })
+    ```
+  </Step>
+
+  <Step title="Use request scope in routes">
+    ```typescript
+    app.get('/users/:id', async (request, reply) => {
+      // Each request has its own scope
+      const [err, user] = await request.scope.task(
+        () => fetchUser(request.params.id),
+        { retry: 'exponential', timeout: 5000 }
+      )
+
+      if (err) {
+        return reply.code(500).send({ error: err.message })
+      }
+
+      return user
+    })
+    ```
+  </Step>
+
+  <Step title="Parallel data fetching">
+    ```typescript
+    app.get('/dashboard', async (request, reply) => {
+      const userId = request.user.id
+
+      // Run multiple queries in parallel
+      const [err, results] = await request.scope.parallel([
+        () => fetchUserProfile(userId),
+        () => fetchUserOrders(userId),
+        () => fetchUserNotifications(userId),
+      ])
+
+      if (err) {
+        return reply.code(500).send({ error: err.message })
+      }
+
+      const [profile, orders, notifications] = results.map(r => r[1])
+
+      return {
+        profile,
+        orders,
+        notifications
+      }
+    })
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The request scope is automatically disposed when the response completes, ensuring all running tasks are cancelled and resources are cleaned up.
+</Note>
+
+## Express Integration
+
+Express middleware provides similar functionality with a familiar middleware pattern.
+
+<CodeGroup>
+```typescript Basic Setup
+import express from 'express'
+import { goGoScope } from '@go-go-scope/adapter-express'
+
+const app = express()
+
+// Apply middleware
+app.use(goGoScope(app, { 
+  name: 'express-api',
+  timeout: 30000 
+}))
+
+app.get('/products/:id', async (req, res) => {
+  const [err, product] = await req.scope.task(
+    () => fetchProduct(req.params.id),
+    { retry: 'exponential' }
+  )
+
+  if (err) {
+    return res.status(500).json({ error: err.message })
+  }
+
+  res.json(product)
+})
+```
+
+```typescript With Authentication
+import express from 'express'
+import { goGoScope } from '@go-go-scope/adapter-express'
+
+const app = express()
+app.use(goGoScope(app))
+
+// Authentication middleware using request scope
+app.use(async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const [err, user] = await req.scope.task(
+    () => verifyToken(token),
+    { timeout: 2000 }
+  )
+
+  if (err) {
+    return res.status(401).json({ error: 'Invalid token' })
+  }
+
+  req.user = user
+  next()
+})
+```
+
+```typescript Graceful Shutdown
+import express from 'express'
+import { goGoScope, closeScope } from '@go-go-scope/adapter-express'
+
+const app = express()
+app.use(goGoScope(app))
+
+const server = app.listen(3000)
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing...')
+  
+  // Dispose root scope (cancels all in-flight requests)
+  await closeScope(app)
+  
+  // Close server
+  server.close(() => {
+    console.log('Server closed')
+    process.exit(0)
+  })
+})
+```
+</CodeGroup>
+
+## NestJS Integration
+
+NestJS module provides dependency injection integration with request-scoped services.
+
+<Steps>
+  <Step title="Import the module">
+    ```typescript
+    import { Module } from '@nestjs/common'
+    import { GoGoScopeModule } from '@go-go-scope/adapter-nestjs'
+
+    @Module({
+      imports: [
+        GoGoScopeModule.forRoot({
+          name: 'nestjs-api',
+          timeout: 30000,
+          isGlobal: true  // Make available in all modules
+        })
+      ]
+    })
+    export class AppModule {}
+    ```
+  </Step>
+
+  <Step title="Inject scope in controllers">
+    ```typescript
+    import { Controller, Get, Param, Req } from '@nestjs/common'
+    import { Request } from 'express'
+
+    @Controller('users')
+    export class UsersController {
+      @Get(':id')
+      async getUser(@Param('id') id: string, @Req() req: Request) {
+        const [err, user] = await req.scope.task(
+          () => this.usersService.findOne(id),
+          { retry: 'exponential', timeout: 5000 }
+        )
+
+        if (err) {
+          throw new HttpException('User not found', HttpStatus.NOT_FOUND)
+        }
+
+        return user
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Use in services">
+    ```typescript
+    import { Injectable } from '@nestjs/common'
+
+    @Injectable()
+    export class UsersService {
+      async findOne(id: string, scope: Scope) {
+        // Use scope for concurrent operations
+        const [err, results] = await scope.parallel([
+          () => this.db.query('SELECT * FROM users WHERE id = ?', [id]),
+          () => this.cache.get(`user:${id}`),
+        ])
+
+        if (err) throw err
+
+        const [dbResult, cacheResult] = results.map(r => r[1])
+        
+        return cacheResult || dbResult
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Advanced Patterns
+
+### Circuit Breaker for External APIs
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+
+const externalApiBreaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 60000,  // 1 minute
+  halfOpenRequests: 3
+})
+
+app.get('/external-data', async (request, reply) => {
+  const [err, data] = await request.scope.task(
+    () => fetch('https://api.example.com/data').then(r => r.json()),
+    { 
+      circuitBreaker: externalApiBreaker,
+      timeout: 5000,
+      retry: 'exponential'
+    }
+  )
+
+  if (err) {
+    return reply.code(503).send({ 
+      error: 'External service unavailable',
+      retryAfter: 60
+    })
+  }
+
+  return data
+})
+```
+
+### Rate Limiting with Semaphore
+
+```typescript
+import { Semaphore } from 'go-go-scope'
+
+// Limit concurrent database connections to 10
+const dbSemaphore = new Semaphore(10)
+
+app.get('/heavy-query', async (request, reply) => {
+  const [err, result] = await request.scope.task(
+    async ({ signal }) => {
+      // Acquire semaphore (blocks if limit reached)
+      await using permit = await dbSemaphore.acquire(signal)
+      
+      // Run heavy database query
+      return await db.query('SELECT * FROM large_table')
+    },
+    { timeout: 30000 }
+  )
+
+  if (err) {
+    return reply.code(500).send({ error: err.message })
+  }
+
+  return result
+})
+```
+
+### Request Cancellation
+
+```typescript
+app.get('/slow-operation', async (request, reply) => {
+  // If client disconnects, the scope is cancelled
+  const [err, result] = await request.scope.task(
+    async ({ signal }) => {
+      // Check cancellation periodically
+      for (let i = 0; i < 100; i++) {
+        if (signal.aborted) {
+          throw new Error('Request cancelled by client')
+        }
+        await processChunk(i)
+      }
+      return 'Complete'
+    },
+    { timeout: 60000 }
+  )
+
+  if (err) {
+    if (err.message.includes('cancelled')) {
+      return reply.code(499).send({ error: 'Client closed request' })
+    }
+    return reply.code(500).send({ error: err.message })
+  }
+
+  return { result }
+})
+```
+
+## Other Framework Adapters
+
+go-go-scope supports many popular frameworks:
+
+- **Hono**: `@go-go-scope/adapter-hono`
+- **Elysia**: `@go-go-scope/adapter-elysia`
+- **Koa**: `@go-go-scope/adapter-koa`
+- **Hapi**: `@go-go-scope/adapter-hapi`
+- **Next.js**: `@go-go-scope/adapter-nextjs`
+- **Remix**: `@go-go-scope/adapter-remix`
+- **SvelteKit**: `@go-go-scope/adapter-sveltekit`
+
+Each adapter follows similar patterns with framework-specific integration details.

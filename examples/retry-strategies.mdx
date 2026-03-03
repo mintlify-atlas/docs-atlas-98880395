@@ -1,0 +1,442 @@
+---
+title: "Retry Strategies"
+description: "Implement retry patterns with exponential backoff, jitter, and conditional retry logic for resilient applications"
+---
+
+# Retry Strategy Patterns
+
+Implement robust retry mechanisms to handle transient failures. go-go-scope provides built-in retry strategies with exponential backoff, jitter, and custom conditions.
+
+## Exponential Backoff
+
+Retry with increasing delays to avoid overwhelming failing services:
+
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+async function fetchWithRetry() {
+  await using s = scope();
+
+  const [err, data] = await s.task(
+    async ({ signal }) => {
+      const response = await fetch('https://api.example.com/data', { signal });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return response.json();
+    },
+    {
+      retry: {
+        maxRetries: 5,
+        delay: exponentialBackoff({
+          initial: 100,      // Start at 100ms
+          max: 10000,        // Cap at 10 seconds
+          multiplier: 2,     // Double each time
+        }),
+      },
+    }
+  );
+
+  if (err) {
+    console.error('Failed after retries:', err);
+    return null;
+  }
+
+  return data;
+}
+
+// Delays: 100ms, 200ms, 400ms, 800ms, 1600ms
+```
+
+## Jitter Strategies
+
+Add randomness to prevent thundering herd:
+
+<Steps>
+  <Step title="Partial jitter">
+    Add random variance to exponential backoff:
+
+    ```typescript
+    import { scope, exponentialBackoff } from 'go-go-scope';
+
+    await using s = scope();
+
+    const [err, result] = await s.task(
+      () => unreliableOperation(),
+      {
+        retry: {
+          maxRetries: 5,
+          delay: exponentialBackoff({
+            initial: 100,
+            max: 5000,
+            jitter: 0.3,  // ±30% randomness
+          }),
+        },
+      }
+    );
+
+    // Delays: ~70-130ms, ~140-260ms, ~280-520ms, etc.
+    ```
+  </Step>
+
+  <Step title="Full jitter (AWS style)">
+    Random value between 0 and calculated delay:
+
+    ```typescript
+    import { scope, exponentialBackoff } from 'go-go-scope';
+
+    await using s = scope();
+
+    const [err, result] = await s.task(
+      () => fetchFromAWS(),
+      {
+        retry: {
+          maxRetries: 5,
+          delay: exponentialBackoff({
+            initial: 100,
+            max: 5000,
+            fullJitter: true,  // AWS-style full jitter
+          }),
+        },
+      }
+    );
+
+    // Delays: 0-100ms, 0-200ms, 0-400ms, 0-800ms, 0-1600ms
+    ```
+  </Step>
+
+  <Step title="Decorrelated jitter (Azure style)">
+    Better distribution for high-contention scenarios:
+
+    ```typescript
+    import { scope, decorrelatedJitter } from 'go-go-scope';
+
+    await using s = scope();
+
+    const [err, result] = await s.task(
+      () => fetchFromAzure(),
+      {
+        retry: {
+          maxRetries: 5,
+          delay: decorrelatedJitter({
+            initial: 100,
+            max: 5000,
+          }),
+        },
+      }
+    );
+
+    // Each delay is random between initial and 3x previous delay
+    ```
+  </Step>
+</Steps>
+
+## Linear Backoff
+
+Increase delay linearly for predictable retry intervals:
+
+```typescript
+import { scope, linear } from 'go-go-scope';
+
+async function retryWithLinearBackoff() {
+  await using s = scope();
+
+  const [err, result] = await s.task(
+    () => performOperation(),
+    {
+      retry: {
+        maxRetries: 5,
+        delay: linear(1000, 500),  // Start at 1s, add 500ms each time
+      },
+    }
+  );
+
+  // Delays: 1000ms, 1500ms, 2000ms, 2500ms, 3000ms
+
+  if (err) {
+    console.error('All retries failed:', err);
+  }
+
+  return result;
+}
+```
+
+## Conditional Retry
+
+Retry only for specific error types:
+
+<CodeGroup>
+```typescript HTTP Status Codes
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+async function retryOnSpecificErrors() {
+  await using s = scope();
+
+  const [err, data] = await s.task(
+    async () => {
+      const response = await fetch('/api/data');
+      
+      if (response.status === 429) {
+        // Rate limited - retry
+        throw new Error('RATE_LIMIT');
+      }
+      
+      if (response.status >= 500) {
+        // Server error - retry
+        throw new Error('SERVER_ERROR');
+      }
+      
+      if (!response.ok) {
+        // Client error - don't retry
+        throw new Error('CLIENT_ERROR');
+      }
+      
+      return response.json();
+    },
+    {
+      retry: {
+        maxRetries: 3,
+        delay: exponentialBackoff(),
+        condition: (error) => {
+          // Only retry on rate limit or server errors
+          return (
+            error instanceof Error && 
+            (error.message === 'RATE_LIMIT' || error.message === 'SERVER_ERROR')
+          );
+        },
+      },
+    }
+  );
+
+  return data;
+}
+```
+
+```typescript Network Errors
+import { scope } from 'go-go-scope';
+
+const RETRYABLE_ERRORS = [
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+];
+
+async function retryNetworkErrors() {
+  await using s = scope();
+
+  const [err, result] = await s.task(
+    () => makeNetworkRequest(),
+    {
+      retry: {
+        maxRetries: 5,
+        delay: exponentialBackoff({ initial: 500, max: 10000 }),
+        condition: (error) => {
+          if (!(error instanceof Error)) return false;
+          
+          // Retry on specific network errors
+          return RETRYABLE_ERRORS.some(code => 
+            error.message.includes(code)
+          );
+        },
+      },
+    }
+  );
+
+  return result;
+}
+```
+</CodeGroup>
+
+## Shorthand Retry Syntax
+
+Use convenient shorthand for common patterns:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+async function shorthandRetry() {
+  await using s = scope();
+
+  // Exponential backoff (default)
+  const [err1, data1] = await s.task(
+    () => operation1(),
+    { retry: 'exponential' }
+  );
+
+  // Linear backoff
+  const [err2, data2] = await s.task(
+    () => operation2(),
+    { retry: 'linear' }
+  );
+
+  // Fixed delay
+  const [err3, data3] = await s.task(
+    () => operation3(),
+    { retry: 'fixed' }
+  );
+
+  // Custom retry count with defaults
+  const [err4, data4] = await s.task(
+    () => operation4(),
+    { retry: { maxRetries: 10 } }  // Uses exponential backoff
+  );
+}
+```
+
+## Retry with Circuit Breaker
+
+Combine retry logic with circuit breaker for better resilience:
+
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+async function retryWithCircuitBreaker() {
+  await using s = scope({
+    circuitBreaker: {
+      failureThreshold: 5,
+      resetTimeout: 30000,  // 30 seconds
+    },
+  });
+
+  // Circuit breaker wraps retry logic
+  const [err, data] = await s.task(
+    async () => {
+      const response = await fetch('/api/unstable');
+      if (!response.ok) throw new Error('Request failed');
+      return response.json();
+    },
+    {
+      retry: {
+        maxRetries: 3,
+        delay: exponentialBackoff({ initial: 1000 }),
+      },
+    }
+  );
+
+  if (err) {
+    console.error('Failed with circuit breaker:', err);
+    // Circuit opens after failureThreshold consecutive failures
+    // Closes automatically after resetTimeout
+  }
+
+  return data;
+}
+```
+
+## Advanced Retry Patterns
+
+Implement sophisticated retry strategies:
+
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+interface RetryConfig {
+  maxRetries: number;
+  backoffMultiplier: number;
+  onRetry?: (attempt: number, error: unknown) => void;
+}
+
+class RetryableOperation<T> {
+  constructor(
+    private operation: () => Promise<T>,
+    private config: RetryConfig
+  ) {}
+
+  async execute() {
+    await using s = scope();
+
+    const [err, result] = await s.task(
+      async ({ signal }) => {
+        return this.operation();
+      },
+      {
+        retry: {
+          maxRetries: this.config.maxRetries,
+          delay: exponentialBackoff({
+            initial: 100,
+            multiplier: this.config.backoffMultiplier,
+          }),
+          onRetry: this.config.onRetry,
+        },
+      }
+    );
+
+    if (err) {
+      throw new Error(`Operation failed after ${this.config.maxRetries} retries: ${err}`);
+    }
+
+    return result!;
+  }
+}
+
+// Usage
+const operation = new RetryableOperation(
+  () => fetch('/api/data').then(r => r.json()),
+  {
+    maxRetries: 5,
+    backoffMultiplier: 2,
+    onRetry: (attempt, error) => {
+      console.log(`Retry ${attempt}:`, error);
+      // Log to monitoring system
+    },
+  }
+);
+
+const data = await operation.execute();
+```
+
+## Idempotent Retry
+
+Ensure operations are safe to retry:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+async function idempotentRetry() {
+  await using s = scope();
+
+  // Use idempotency key to prevent duplicate operations
+  const idempotencyKey = crypto.randomUUID();
+
+  const [err, result] = await s.task(
+    async () => {
+      return fetch('/api/payment', {
+        method: 'POST',
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ amount: 100 }),
+      });
+    },
+    {
+      retry: {
+        maxRetries: 3,
+        delay: exponentialBackoff({ initial: 1000 }),
+      },
+    }
+  );
+
+  // Safe to retry - server deduplicates by idempotency key
+  return result;
+}
+```
+
+## Best Practices
+
+- **Use exponential backoff**: Default choice for most scenarios
+- **Add jitter**: Prevents thundering herd in distributed systems
+- **Set max delay**: Cap backoff to avoid excessively long waits
+- **Conditional retry**: Only retry transient errors (5xx, timeouts, network)
+- **Don't retry**: Client errors (4xx except 429), auth failures, validation errors
+- **Idempotency**: Design operations to be safely retryable
+- **Monitor retry metrics**: Track retry rates and success/failure
+- **Circuit breaker**: Combine with retry for better fault tolerance
+- **Timeout**: Set overall timeout to prevent infinite retry loops
+
+## Related Patterns
+
+- [Health Checks](/examples/health-checks) - Verify service availability before retry
+- [Rate Limiting](/examples/rate-limiting) - Handle 429 rate limit errors
+- [Circuit Breaker](https://github.com/thelinuxlich/go-go-scope/blob/main/docs/05-resilience-patterns.md) - Fail fast when service is down

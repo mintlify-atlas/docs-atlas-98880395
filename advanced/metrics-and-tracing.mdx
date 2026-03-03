@@ -1,0 +1,937 @@
+---
+title: "Metrics & Tracing"
+description: "Monitor performance and trace distributed operations with Prometheus metrics and OpenTelemetry integration"
+---
+
+# Metrics & Tracing
+
+go-go-scope provides comprehensive observability through Prometheus-compatible metrics collection and OpenTelemetry distributed tracing. Monitor task performance, resource utilization, and trace operations across distributed systems.
+
+## Overview
+
+**Metrics Collection** (`@go-go-scope/plugin-metrics`):
+- Task execution metrics (spawned, completed, failed, duration)
+- Resource lifecycle tracking
+- Custom counters, gauges, and histograms
+- Export to Prometheus, JSON, or OpenTelemetry format
+- Automatic primitive metrics (channels, semaphores, pools)
+
+**Distributed Tracing** (`@go-go-scope/plugin-opentelemetry`):
+- Automatic span creation for scopes and tasks
+- Span linking for cross-operation tracing
+- Message flow tracking across services
+- Deadlock detection with graph visualization
+- Jaeger, Zipkin, and OpenTelemetry Collector support
+
+## Quick Start
+
+<CodeGroup>
+```typescript Metrics
+import { scope, metricsPlugin } from 'go-go-scope';
+
+await using s = scope({
+  plugins: [
+    metricsPlugin({
+      metrics: true,
+      metricsExport: {
+        interval: 10000,
+        format: 'prometheus',
+        destination: (metrics) => {
+          console.log(metrics);
+        }
+      }
+    })
+  ]
+});
+
+// Tasks are automatically tracked
+s.task(async () => {
+  await doWork();
+});
+
+// Get metrics snapshot
+const metrics = s.metrics?.();
+console.log(`Tasks completed: ${metrics?.tasksCompleted}`);
+console.log(`Avg duration: ${metrics?.avgTaskDuration}ms`);
+```
+
+```typescript Tracing
+import { scope } from 'go-go-scope';
+import { opentelemetryPlugin } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('my-service');
+
+await using s = scope({
+  plugins: [
+    opentelemetryPlugin(tracer, {
+      name: 'main-scope',
+      attributes: { 'service.version': '1.0.0' }
+    })
+  ]
+});
+
+// Tasks are automatically traced
+s.task(async ({ signal }) => {
+  // Span automatically created
+  await processRequest(signal);
+}, {
+  otel: {
+    name: 'process-request',
+    attributes: { 'request.id': '12345' }
+  }
+});
+```
+</CodeGroup>
+
+## Metrics Collection
+
+### Installation
+
+```bash
+npm install go-go-scope @go-go-scope/plugin-metrics
+```
+
+### Metrics Plugin Setup
+
+<CodeGroup>
+```typescript Basic Setup
+import { scope, metricsPlugin } from 'go-go-scope';
+
+await using s = scope({
+  plugins: [metricsPlugin({ metrics: true })]
+});
+
+// Get metrics
+const metrics = s.metrics?.();
+console.log(metrics);
+```
+
+```typescript With Export
+import { scope, metricsPlugin } from 'go-go-scope';
+import { writeFileSync } from 'fs';
+
+await using s = scope({
+  plugins: [
+    metricsPlugin({
+      metrics: true,
+      metricsExport: {
+        interval: 15000,        // Export every 15 seconds
+        format: 'prometheus',   // prometheus | json | otel
+        prefix: 'myapp',        // Metric prefix
+        destination: (metrics) => {
+          // Write to file, send to collector, etc.
+          writeFileSync('/tmp/metrics.txt', metrics);
+        }
+      }
+    })
+  ]
+});
+```
+
+```typescript HTTP Endpoint
+import { scope, metricsPlugin } from 'go-go-scope';
+import express from 'express';
+
+const app = express();
+
+await using s = scope({
+  plugins: [metricsPlugin({ metrics: true })]
+});
+
+// Expose /metrics endpoint
+app.get('/metrics', (req, res) => {
+  const metrics = s.metrics?.();
+  const { exportMetrics } = await import('go-go-scope');
+  
+  const output = exportMetrics(metrics, {
+    format: 'prometheus',
+    prefix: 'myapp',
+    includeTimestamps: true
+  });
+  
+  res.set('Content-Type', 'text/plain');
+  res.send(output);
+});
+
+app.listen(3000);
+```
+</CodeGroup>
+
+### Scope Metrics
+
+Automatic metrics collected by the plugin:
+
+```typescript
+interface ScopeMetrics {
+  tasksSpawned: number;        // Total tasks created
+  tasksCompleted: number;      // Successfully completed
+  tasksFailed: number;         // Failed with errors
+  totalTaskDuration: number;   // Sum of all task durations (ms)
+  avgTaskDuration: number;     // Average task duration
+  p95TaskDuration: number;     // 95th percentile duration
+  resourcesRegistered: number; // Total resources created
+  resourcesDisposed: number;   // Resources cleaned up
+  scopeDuration?: number;      // Total scope lifetime (ms)
+}
+
+const metrics = s.metrics?.();
+console.log(`Success rate: ${(metrics.tasksCompleted / metrics.tasksSpawned * 100).toFixed(2)}%`);
+```
+
+### Custom Metrics
+
+Create custom counters, gauges, and histograms:
+
+<CodeGroup>
+```typescript Counters
+// Counter: monotonically increasing value
+const requestCounter = s.counter?.('http_requests_total');
+
+app.get('/api', (req, res) => {
+  requestCounter?.inc();
+  res.json({ status: 'ok' });
+});
+
+app.post('/api', (req, res) => {
+  requestCounter?.inc(1); // Explicit increment
+  res.json({ status: 'created' });
+});
+
+console.log(`Total requests: ${requestCounter?.value()}`);
+requestCounter?.reset(); // Reset to 0
+```
+
+```typescript Gauges
+// Gauge: value that can go up or down
+const activeConnections = s.gauge?.('active_connections');
+
+server.on('connection', () => {
+  activeConnections?.inc();
+});
+
+server.on('close', () => {
+  activeConnections?.dec();
+});
+
+activeConnections?.set(42); // Set to specific value
+
+console.log(`Active: ${activeConnections?.value()}`);
+```
+
+```typescript Histograms
+// Histogram: observe distribution of values
+const responseTime = s.histogram?.('http_response_time_ms');
+
+app.get('/api', async (req, res) => {
+  const start = performance.now();
+  
+  await handleRequest(req);
+  
+  const duration = performance.now() - start;
+  responseTime?.record(duration);
+  
+  res.json({ status: 'ok' });
+});
+
+const snapshot = responseTime?.snapshot();
+console.log(`Avg: ${snapshot?.avg}ms`);
+console.log(`P95: ${snapshot?.p95}ms`);
+console.log(`P99: ${snapshot?.p99}ms`);
+```
+</CodeGroup>
+
+### Histogram Snapshots
+
+```typescript
+interface HistogramSnapshot {
+  name: string;      // Metric name
+  count: number;     // Number of observations
+  sum: number;       // Sum of all values
+  min: number;       // Minimum value
+  max: number;       // Maximum value
+  avg: number;       // Average value
+  p50: number;       // Median (50th percentile)
+  p90: number;       // 90th percentile
+  p95: number;       // 95th percentile
+  p99: number;       // 99th percentile
+}
+
+const histogram = s.histogram?.('request_duration');
+
+// Record some values
+histogram?.record(100);
+histogram?.record(200);
+histogram?.record(150);
+
+const snapshot = histogram?.snapshot();
+console.log(`Processed ${snapshot.count} requests`);
+console.log(`Min: ${snapshot.min}ms, Max: ${snapshot.max}ms`);
+console.log(`Median: ${snapshot.p50}ms, P95: ${snapshot.p95}ms`);
+```
+
+## Export Formats
+
+### Prometheus Format
+
+Standard Prometheus text format for scraping:
+
+```typescript
+import { exportMetrics } from 'go-go-scope';
+
+const metrics = s.metrics?.();
+const prometheus = exportMetrics(metrics, {
+  format: 'prometheus',
+  prefix: 'myapp',
+  includeTimestamps: true
+});
+
+console.log(prometheus);
+// Output:
+// # HELP myapp_tasks_spawned_total Total number of tasks spawned
+// # TYPE myapp_tasks_spawned_total counter
+// myapp_tasks_spawned_total 42 1704067200000
+// # HELP myapp_tasks_completed_total Total number of tasks completed
+// # TYPE myapp_tasks_completed_total counter
+// myapp_tasks_completed_total 40 1704067200000
+// ...
+```
+
+### JSON Format
+
+```typescript
+const json = exportMetrics(metrics, {
+  format: 'json',
+  prefix: 'myapp'
+});
+
+console.log(json);
+// Output:
+// {
+//   "myapp": {
+//     "tasksSpawned": 42,
+//     "tasksCompleted": 40,
+//     "tasksFailed": 2,
+//     "avgTaskDuration": 125.5,
+//     "p95TaskDuration": 200
+//   }
+// }
+```
+
+### OpenTelemetry Format
+
+```typescript
+const otel = exportMetrics(metrics, {
+  format: 'otel',
+  prefix: 'go-go-scope'
+});
+
+console.log(otel);
+// Outputs OTLP JSON format for metrics
+```
+
+## Primitive Metrics
+
+Automatic metrics for concurrency primitives:
+
+```typescript
+import { PrimitiveMetricsRegistry } from '@go-go-scope/plugin-metrics';
+
+const registry = new PrimitiveMetricsRegistry(s);
+
+// Register a channel
+const ch = s.channel<number>(10);
+registry.registerChannel('my-channel', {
+  size: ch.size,
+  cap: ch.cap,
+  isClosed: ch.isClosed,
+  strategy: 'drop'
+});
+
+// Record operations
+registry.recordChannelSend('my-channel', false, false);
+registry.recordChannelReceive('my-channel', true);
+
+// Export metrics
+const prometheus = registry.exportAsPrometheus('myapp');
+const json = registry.exportAsJson();
+```
+
+### Channel Metrics
+
+```typescript
+interface ChannelMetrics {
+  messagesSent: number;        // Total sent
+  messagesReceived: number;    // Total received
+  bufferSize: number;          // Current buffer size
+  bufferCapacity: number;      // Max capacity
+  messagesDropped: number;     // Dropped due to backpressure
+  blockedSends: number;        // Send operations that blocked
+  blockedReceives: number;     // Receive operations that waited
+  state: string;               // 'open' | 'closed' | 'aborted'
+}
+```
+
+### Circuit Breaker Metrics
+
+```typescript
+interface CircuitBreakerMetrics {
+  state: string;               // 'closed' | 'open' | 'half-open'
+  failureCount: number;        // Current failures
+  failureThreshold: number;    // Threshold before opening
+  totalFailures: number;       // All-time failures
+  totalSuccesses: number;      // All-time successes
+  stateTransitions: number;    // State change count
+  errorRate?: number;          // Current error rate (if adaptive)
+}
+```
+
+### Semaphore Metrics
+
+```typescript
+interface SemaphoreMetrics {
+  totalPermits: number;        // Max permits
+  availablePermits: number;    // Currently available
+  waitingCount: number;        // Waiting acquirers
+  totalAcquisitions: number;   // All acquisitions
+  timeoutCount: number;        // Timed out acquisitions
+}
+```
+
+### Resource Pool Metrics
+
+```typescript
+interface ResourcePoolMetrics {
+  minSize: number;             // Min pool size
+  maxSize: number;             // Max pool size
+  currentSize: number;         // Current pool size
+  available: number;           // Available resources
+  inUse: number;               // Resources in use
+  totalAcquisitions: number;   // All acquisitions
+  timeoutCount: number;        // Timed out
+  resourcesCreated: number;    // Created count
+  resourcesDestroyed: number;  // Destroyed count
+  healthCheckFailures: number; // Failed health checks
+}
+```
+
+## OpenTelemetry Tracing
+
+### Installation
+
+```bash
+npm install @go-go-scope/plugin-opentelemetry
+npm install @opentelemetry/api @opentelemetry/sdk-node
+```
+
+### Basic Tracing Setup
+
+<Steps>
+  <Step title="Initialize OpenTelemetry SDK">
+    ```typescript
+    import { NodeSDK } from '@opentelemetry/sdk-node';
+    import { ConsoleSpanExporter } from '@opentelemetry/sdk-trace-node';
+    import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+    
+    const sdk = new NodeSDK({
+      traceExporter: new ConsoleSpanExporter(),
+      instrumentations: [getNodeAutoInstrumentations()]
+    });
+    
+    sdk.start();
+    ```
+  </Step>
+  
+  <Step title="Get Tracer">
+    ```typescript
+    import { trace } from '@opentelemetry/api';
+    
+    const tracer = trace.getTracer('my-service', '1.0.0');
+    ```
+  </Step>
+  
+  <Step title="Create Scope with Tracing">
+    ```typescript
+    import { scope } from 'go-go-scope';
+    import { opentelemetryPlugin } from '@go-go-scope/plugin-opentelemetry';
+    
+    await using s = scope({
+      plugins: [
+        opentelemetryPlugin(tracer, {
+          name: 'main-scope',
+          attributes: {
+            'service.name': 'my-service',
+            'service.version': '1.0.0'
+          }
+        })
+      ]
+    });
+    ```
+  </Step>
+</Steps>
+
+### Automatic Task Tracing
+
+Tasks automatically create spans:
+
+```typescript
+import { scope } from 'go-go-scope';
+import { opentelemetryPlugin } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('my-service');
+
+await using s = scope({
+  plugins: [opentelemetryPlugin(tracer)]
+});
+
+// Automatic span creation
+s.task(async () => {
+  // Span automatically created with name "scope.task"
+  await doWork();
+});
+
+// Custom span name and attributes
+s.task(async () => {
+  await processOrder();
+}, {
+  otel: {
+    name: 'process-order',
+    attributes: {
+      'order.id': '12345',
+      'customer.id': 'cust-789'
+    }
+  }
+});
+```
+
+### Jaeger Exporter
+
+Export traces to Jaeger for visualization:
+
+```typescript
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+
+const jaegerExporter = new JaegerExporter({
+  endpoint: 'http://localhost:14268/api/traces',
+});
+
+const sdk = new NodeSDK({
+  spanProcessor: new BatchSpanProcessor(jaegerExporter),
+});
+
+sdk.start();
+
+// Now all traces go to Jaeger
+```
+
+### OTLP Exporter
+
+Export to OpenTelemetry Collector:
+
+```typescript
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+
+const otlpExporter = new OTLPTraceExporter({
+  url: 'http://localhost:4318/v1/traces',
+});
+
+const sdk = new NodeSDK({
+  traceExporter: otlpExporter,
+});
+
+sdk.start();
+```
+
+## Enhanced Tracing Features
+
+### Message Flow Tracking
+
+Track messages across distributed operations:
+
+```typescript
+import { MessageFlowTracker } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const tracker = new MessageFlowTracker(trace.getTracer('my-service'));
+
+// Start tracking a message
+const flow = tracker.startFlow('msg-123', 'order-created');
+
+// Record steps as message moves through system
+tracker.recordStep('msg-123', 'validate-order');
+tracker.recordStep('msg-123', 'charge-payment');
+tracker.recordStep('msg-123', 'send-confirmation');
+
+// Complete flow
+tracker.completeFlow('msg-123');
+
+// Get flow information
+const flowInfo = tracker.getFlow('msg-123');
+console.log(`Message took ${flowInfo.path.length} steps`);
+
+// Export as Mermaid sequence diagram
+const diagrams = tracker.exportAsMermaid('msg-123');
+console.log(diagrams[0]);
+```
+
+### Channel Tracing with Span Linking
+
+Trace message passing through channels:
+
+```typescript
+import { ChannelTracer } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const channelTracer = new ChannelTracer(trace.getTracer('my-service'));
+const ch = s.channel<{id: string, data: unknown}>(10);
+
+// Producer
+s.task(async () => {
+  const msg = { id: 'msg-456', data: { order: 123 } };
+  
+  // Create send span
+  const sendSpan = channelTracer.traceSend(ch, msg.id, msg);
+  await ch.send(msg);
+  sendSpan.end();
+});
+
+// Consumer
+s.task(async () => {
+  const msg = await ch.receive();
+  
+  // Create receive span linked to send span
+  const receiveSpan = channelTracer.traceReceive(ch, msg.id);
+  await processMessage(msg);
+  receiveSpan.end();
+});
+
+// Get flow tracker
+const flowTracker = channelTracer.getFlowTracker();
+const flows = flowTracker.getActiveFlows();
+```
+
+### Deadlock Detection
+
+Detect and visualize deadlocks:
+
+```typescript
+import { DeadlockDetector } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const detector = new DeadlockDetector(trace.getTracer('my-service'));
+
+// Register nodes
+detector.registerNode('task-1', 'task', 'waiting');
+detector.registerNode('task-2', 'task', 'waiting');
+detector.registerNode('lock-a', 'lock', 'held');
+detector.registerNode('lock-b', 'lock', 'held');
+
+// Record relationships
+detector.recordHold('task-1', 'lock-a');
+detector.recordWait('task-1', 'lock-b');
+detector.recordHold('task-2', 'lock-b');
+detector.recordWait('task-2', 'lock-a');
+
+// Check for deadlocks
+const graph = detector.checkForDeadlock();
+if (graph.cycles.length > 0) {
+  console.error(`Deadlock detected: ${graph.cycles.length} cycles`);
+  
+  // Export as Mermaid diagram
+  console.log(detector.exportAsMermaid());
+  
+  // Export as Graphviz DOT
+  console.log(detector.exportAsGraphviz());
+}
+```
+
+### Automatic Deadlock Monitoring
+
+```typescript
+import { setupEnhancedTracing } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const { channelTracer, deadlockDetector } = setupEnhancedTracing(s, {
+  trackMessageFlows: true,
+  enableDeadlockDetection: true,
+  deadlockCheckInterval: 5000,
+  onDeadlock: (graph) => {
+    console.error('Deadlock detected!');
+    console.error(`Cycles: ${graph.cycles.length}`);
+    console.error(TraceVisualizer.deadlockToMermaid(graph));
+    
+    // Send alert
+    alerting.sendAlert({
+      severity: 'critical',
+      message: 'Deadlock detected in application',
+      details: graph
+    });
+  },
+  linkChannelSpans: true,
+  enableVisualExport: true
+}, trace.getTracer('my-service'));
+```
+
+## Trace Visualization
+
+### Mermaid Diagrams
+
+Generate Mermaid diagrams for documentation:
+
+```typescript
+import { 
+  TraceVisualizer,
+  MessageFlowTracker,
+  DeadlockDetector 
+} from '@go-go-scope/plugin-opentelemetry';
+
+// Message flow as sequence diagram
+const flowTracker = new MessageFlowTracker();
+const flow = flowTracker.startFlow('msg-789');
+flowTracker.recordStep('msg-789', 'validate');
+flowTracker.recordStep('msg-789', 'process');
+
+const sequenceDiagram = TraceVisualizer.toMermaidSequence(flow);
+console.log(sequenceDiagram);
+// Output:
+// sequenceDiagram
+//     participant Source as 1a2b3c4d
+//     participant Dest0 as 5e6f7g8h
+//     Source->>Dest0: validate (12:34:56)
+//     Source->>Dest0: process (12:34:57)
+
+// Deadlock graph as flowchart
+const detector = new DeadlockDetector();
+// ... register nodes and edges ...
+
+const flowchart = TraceVisualizer.deadlockToMermaid(detector.checkForDeadlock());
+console.log(flowchart);
+// Output:
+// flowchart TD
+//     task-1(["task:waiting"]):::waiting
+//     lock-a[["lock:held"]]
+//     task-1 -.->|waits-for| lock-a
+```
+
+### Graphviz DOT Format
+
+```typescript
+const dot = TraceVisualizer.deadlockToGraphviz(graph);
+console.log(dot);
+// Output:
+// digraph DeadlockGraph {
+//     rankdir=LR;
+//     node [shape=box, style=rounded];
+//     "task-1" [label="task\nwaiting", fillcolor=lightcoral, style=filled];
+//     "lock-a" [label="lock\nheld", fillcolor=lightblue, style=filled];
+//     "task-1" -> "lock-a" [label="waits-for", color=red, style=dashed];
+// }
+```
+
+### Jaeger JSON Export
+
+```typescript
+const jaeger = TraceVisualizer.toJaegerFormat(flow);
+console.log(JSON.stringify(jaeger, null, 2));
+// Jaeger-compatible JSON format
+```
+
+## Scope Tracer
+
+Manually trace scope hierarchy:
+
+```typescript
+import { ScopeTracer } from '@go-go-scope/plugin-opentelemetry';
+import { trace } from '@opentelemetry/api';
+
+const scopeTracer = new ScopeTracer(trace.getTracer('my-service'));
+
+// Trace main scope
+const mainSpan = scopeTracer.traceScope(s, 'main-scope');
+
+// Create child scope with linked span
+const childScope = scope({ parent: s });
+const childSpan = scopeTracer.traceChildTask(s, 'child-task');
+
+// ... do work ...
+
+childSpan.end();
+scopeTracer.endScope(childScope);
+mainSpan.end();
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use Consistent Naming">
+    ```typescript
+    s.task(async () => {
+      // Good: descriptive, consistent naming
+      await processOrder();
+    }, {
+      otel: { name: 'order.process' }
+    });
+    
+    // Avoid: generic names
+    // otel: { name: 'task1' }
+    ```
+  </Step>
+  
+  <Step title="Add Meaningful Attributes">
+    ```typescript
+    s.task(async () => {
+      await processOrder(orderId, customerId);
+    }, {
+      otel: {
+        name: 'order.process',
+        attributes: {
+          'order.id': orderId,
+          'customer.id': customerId,
+          'order.amount': amount,
+          'order.currency': 'USD'
+        }
+      }
+    });
+    ```
+  </Step>
+  
+  <Step title="Export Metrics Regularly">
+    ```typescript
+    metricsPlugin({
+      metricsExport: {
+        interval: 15000, // Every 15 seconds
+        format: 'prometheus',
+        destination: async (metrics) => {
+          await pushToCollector(metrics);
+        }
+      }
+    })
+    ```
+  </Step>
+  
+  <Step title="Monitor Primitive Metrics">
+    Track channels, semaphores, and pools to detect bottlenecks.
+  </Step>
+  
+  <Step title="Enable Deadlock Detection in Development">
+    ```typescript
+    setupEnhancedTracing(s, {
+      enableDeadlockDetection: process.env.NODE_ENV !== 'production',
+      deadlockCheckInterval: 5000
+    });
+    ```
+  </Step>
+  
+  <Step title="Use Sampling in Production">
+    ```typescript
+    import { TraceIdRatioBasedSampler } from '@opentelemetry/sdk-trace-node';
+    
+    const sdk = new NodeSDK({
+      sampler: new TraceIdRatioBasedSampler(0.1), // 10% sampling
+    });
+    ```
+  </Step>
+</Steps>
+
+## Complete Example
+
+```typescript
+import { scope, metricsPlugin } from 'go-go-scope';
+import { opentelemetryPlugin } from '@go-go-scope/plugin-opentelemetry';
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
+import { trace } from '@opentelemetry/api';
+
+// Initialize OpenTelemetry
+const sdk = new NodeSDK({
+  traceExporter: new JaegerExporter({
+    endpoint: 'http://localhost:14268/api/traces'
+  })
+});
+sdk.start();
+
+const tracer = trace.getTracer('my-service', '1.0.0');
+
+// Create scope with metrics and tracing
+await using s = scope({
+  plugins: [
+    metricsPlugin({
+      metrics: true,
+      metricsExport: {
+        interval: 10000,
+        format: 'prometheus',
+        prefix: 'myapp',
+        destination: (metrics) => {
+          // Push to Prometheus Pushgateway
+          fetch('http://localhost:9091/metrics/job/my-service', {
+            method: 'POST',
+            body: metrics
+          });
+        }
+      }
+    }),
+    opentelemetryPlugin(tracer, {
+      name: 'main-scope',
+      attributes: {
+        'service.name': 'my-service',
+        'service.version': '1.0.0'
+      }
+    })
+  ]
+});
+
+// Custom metrics
+const requestCounter = s.counter?.('http_requests_total');
+const activeJobs = s.gauge?.('active_jobs');
+const processingTime = s.histogram?.('job_processing_time_ms');
+
+// Process jobs with metrics and tracing
+s.task(async ({ signal }) => {
+  while (!signal.aborted) {
+    const job = await queue.next({ signal });
+    
+    requestCounter?.inc();
+    activeJobs?.inc();
+    
+    const start = performance.now();
+    
+    try {
+      await s.task(async () => {
+        await processJob(job);
+      }, {
+        otel: {
+          name: 'job.process',
+          attributes: {
+            'job.id': job.id,
+            'job.type': job.type
+          }
+        }
+      });
+    } finally {
+      const duration = performance.now() - start;
+      processingTime?.record(duration);
+      activeJobs?.dec();
+    }
+  }
+});
+
+// Log metrics periodically
+setInterval(() => {
+  const metrics = s.metrics?.();
+  console.log(`Tasks: ${metrics?.tasksCompleted}/${metrics?.tasksSpawned}`);
+  console.log(`Avg duration: ${metrics?.avgTaskDuration.toFixed(2)}ms`);
+  console.log(`P95 duration: ${metrics?.p95TaskDuration.toFixed(2)}ms`);
+  
+  const snapshot = processingTime?.snapshot();
+  console.log(`Job processing P95: ${snapshot?.p95.toFixed(2)}ms`);
+}, 30000);
+```
+
+## Related Resources
+
+- [Plugins](/advanced/plugins) - Creating custom plugins
+- [Health Checks](/advanced/health-checks) - Application health monitoring
+- [Graceful Shutdown](/advanced/graceful-shutdown) - Coordinated shutdown with metrics

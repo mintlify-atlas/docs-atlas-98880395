@@ -1,0 +1,957 @@
+---
+title: '@go-go-scope/stream'
+description: 'Lazy async iterable streams with 50+ composable operations for data processing'
+---
+
+# @go-go-scope/stream
+
+Lazy async iterable streams for go-go-scope with 50+ composable operations. Process async data with functional, lazy evaluation that integrates seamlessly with structured concurrency.
+
+## Installation
+
+```bash
+npm install @go-go-scope/stream
+```
+
+## Quick Start
+
+```typescript
+import { scope } from 'go-go-scope'
+import { Stream } from '@go-go-scope/stream'
+
+await using s = scope()
+
+const [err, results] = await s.stream(fetchData())
+  .map(x => x * 2)
+  .filter(x => x > 10)
+  .take(5)
+  .toArray()
+```
+
+## Core Concepts
+
+### Lazy Evaluation
+
+All stream operations are lazy - they don't execute until a terminal operation (like `toArray()`, `forEach()`, or `drain()`) is called. This allows for efficient composition without materializing intermediate results.
+
+### Automatic Cancellation
+
+Streams integrate with go-go-scope's structured concurrency. When the parent scope is disposed, all stream operations are automatically cancelled.
+
+### Result Tuples
+
+Terminal operations return `Result<Error, T>` tuples for type-safe error handling:
+
+```typescript
+const [err, results] = await stream.toArray()
+if (err) {
+  console.error('Stream failed:', err)
+} else {
+  console.log('Results:', results)
+}
+```
+
+## Stream Class
+
+### Constructor
+
+<ParamField path="source" type="AsyncIterable<T>" required>
+  The async iterable data source
+</ParamField>
+
+<ParamField path="scope" type="Scope" required>
+  The parent scope for cancellation propagation
+</ParamField>
+
+## Transformation Operations
+
+### map()
+
+Transform each value using a mapping function.
+
+```typescript
+stream.map((value, index) => value * 2)
+```
+
+<ParamField path="fn" type="(value: T, index: number) => R" required>
+  Transformation function applied to each element
+</ParamField>
+
+<ResponseField name="Stream<R>" type="Stream<R>">
+  New stream with transformed values
+</ResponseField>
+
+### filter()
+
+Filter values based on a predicate.
+
+```typescript
+stream.filter((value, index) => value > 10)
+```
+
+<ParamField path="predicate" type="(value: T, index: number) => boolean" required>
+  Function that returns true to keep the element
+</ParamField>
+
+### flatMap()
+
+Map each value to an iterable and flatten the results.
+
+```typescript
+stream.flatMap((value, index) => [value, value * 2])
+```
+
+<ParamField path="fn" type="(value: T, index: number) => Iterable<R> | AsyncIterable<R>" required>
+  Function that returns an iterable for each element
+</ParamField>
+
+### flat()
+
+Flatten a stream of iterables by one level.
+
+```typescript
+stream.flat() // Stream<Iterable<R>> => Stream<R>
+```
+
+### tap()
+
+Perform side effects without modifying values.
+
+```typescript
+stream.tap(value => console.log('Processing:', value))
+```
+
+<ParamField path="fn" type="(value: T) => void | Promise<void>" required>
+  Side effect function called for each element
+</ParamField>
+
+### filterMap()
+
+Map and filter in one operation. Returns undefined/null to filter out values.
+
+```typescript
+stream.filterMap(x => {
+  const n = parseInt(x, 10)
+  return isNaN(n) ? undefined : n
+})
+```
+
+## Error Handling
+
+### catchAll()
+
+Catch errors and recover with a fallback stream.
+
+```typescript
+stream.catchAll(error => {
+  console.error('Stream error:', error)
+  return (async function*() { yield 'fallback' })()
+})
+```
+
+<ParamField path="handler" type="(error: unknown) => AsyncIterable<R>" required>
+  Handler that returns a fallback stream
+</ParamField>
+
+### orElse()
+
+Provide fallback stream on error or empty source.
+
+```typescript
+stream.orElse(fallbackStream)
+```
+
+### orElseSucceed()
+
+Provide a single fallback value on failure.
+
+```typescript
+stream.orElseSucceed('default')
+```
+
+### tapError()
+
+Perform side effects on errors without modifying the error.
+
+```typescript
+stream.tapError(err => console.error('Error occurred:', err))
+```
+
+### mapError()
+
+Transform errors using a mapping function.
+
+```typescript
+stream.mapError(err => new CustomError(err.message))
+```
+
+### ensuring()
+
+Run cleanup effect when stream completes (success or error).
+
+```typescript
+stream.ensuring(() => console.log('Stream completed'))
+```
+
+## Slicing Operations
+
+### take()
+
+Take first n elements.
+
+```typescript
+stream.take(5)
+```
+
+<ParamField path="n" type="number" required>
+  Number of elements to take
+</ParamField>
+
+### takeWhile()
+
+Take elements while predicate holds.
+
+```typescript
+stream.takeWhile(x => x < 100)
+```
+
+### takeUntil()
+
+Take elements until predicate succeeds (inclusive).
+
+```typescript
+stream.takeUntil(x => x === 'END')
+```
+
+### drop()
+
+Skip first n elements.
+
+```typescript
+stream.drop(10)
+```
+
+### dropWhile()
+
+Skip elements while predicate holds.
+
+```typescript
+stream.dropWhile(x => x < 10)
+```
+
+### dropUntil()
+
+Skip elements until predicate succeeds.
+
+```typescript
+stream.dropUntil(x => x > 0)
+```
+
+### skip()
+
+Alias for `drop()`.
+
+## Accumulating Operations
+
+### scan()
+
+Running fold - emit intermediate accumulator results.
+
+```typescript
+stream.scan((acc, value) => acc + value, 0)
+// [1, 2, 3] => [1, 3, 6]
+```
+
+<ParamField path="fn" type="(acc: R, value: T) => R" required>
+  Accumulator function
+</ParamField>
+
+<ParamField path="initial" type="R" required>
+  Initial accumulator value
+</ParamField>
+
+### buffer()
+
+Buffer values into fixed-size chunks.
+
+```typescript
+stream.buffer(3)
+// [1, 2, 3, 4, 5] => [[1, 2, 3], [4, 5]]
+```
+
+<ParamField path="size" type="number" required>
+  Chunk size
+</ParamField>
+
+### bufferTime()
+
+Buffer values within time windows.
+
+```typescript
+stream.bufferTime(1000) // 1 second windows
+```
+
+<ParamField path="windowMs" type="number" required>
+  Time window in milliseconds
+</ParamField>
+
+### bufferTimeOrCount()
+
+Buffer by size OR time window, whichever comes first.
+
+```typescript
+stream.bufferTimeOrCount(1000, 10)
+// Emit when 10 items OR 1 second elapsed
+```
+
+### distinct()
+
+Emit only unique values (using ===).
+
+```typescript
+stream.distinct()
+// [1, 2, 2, 3, 1] => [1, 2, 3]
+```
+
+### distinctBy()
+
+Emit only unique values based on key function.
+
+```typescript
+stream.distinctBy(x => x.id)
+```
+
+### distinctAdjacent()
+
+Emit only values different from previous one.
+
+```typescript
+stream.distinctAdjacent()
+// [1, 1, 2, 2, 1] => [1, 2, 1]
+```
+
+### distinctAdjacentBy()
+
+Emit only values different from previous based on key.
+
+```typescript
+stream.distinctAdjacentBy(x => x.type)
+```
+
+### prepend()
+
+Prepend values to the stream.
+
+```typescript
+stream.prepend('a', 'b')
+```
+
+### append()
+
+Append values to the stream.
+
+```typescript
+stream.append('x', 'y', 'z')
+```
+
+### concat()
+
+Concatenate another stream after this one.
+
+```typescript
+stream.concat(otherStream)
+```
+
+### intersperse()
+
+Insert separator between values.
+
+```typescript
+stream.intersperse(',')
+// [1, 2, 3] => [1, ',', 2, ',', 3]
+```
+
+### groupAdjacentBy()
+
+Group consecutive elements by key function.
+
+```typescript
+stream.groupAdjacentBy(x => x.category)
+```
+
+## Timing Operations
+
+### delay()
+
+Add delay between elements.
+
+```typescript
+stream.delay(100) // 100ms between each element
+```
+
+<ParamField path="ms" type="number" required>
+  Delay in milliseconds
+</ParamField>
+
+### throttle()
+
+Limit rate of emissions.
+
+```typescript
+stream.throttle({ limit: 10, interval: 1000 })
+// Max 10 items per second
+```
+
+<ParamField path="options.limit" type="number" required>
+  Maximum items per interval
+</ParamField>
+
+<ParamField path="options.interval" type="number" required>
+  Time interval in milliseconds
+</ParamField>
+
+### debounce()
+
+Emit only after silence period.
+
+```typescript
+stream.debounce(300)
+// Emits value only after 300ms of no new values
+```
+
+<ParamField path="ms" type="number" required>
+  Silence period in milliseconds
+</ParamField>
+
+### timeout()
+
+Fail if stream doesn't complete within duration.
+
+```typescript
+stream.timeout(5000) // 5 second timeout
+```
+
+<ParamField path="durationMs" type="number" required>
+  Timeout duration in milliseconds
+</ParamField>
+
+### sample()
+
+Sample the stream at regular intervals.
+
+```typescript
+stream.sample(1000) // Emit latest value every second
+```
+
+### auditTime()
+
+Emit latest value after duration silence.
+
+```typescript
+stream.auditTime(500)
+```
+
+## Combining Operations
+
+### merge()
+
+Merge with another stream (interleave values).
+
+```typescript
+stream.merge(otherStream)
+```
+
+### zip()
+
+Zip with another stream - pair elements.
+
+```typescript
+stream.zip(otherStream)
+// [1, 2, 3] + ['a', 'b', 'c'] => [[1, 'a'], [2, 'b'], [3, 'c']]
+```
+
+### zipWithIndex()
+
+Zip with index.
+
+```typescript
+stream.zipWithIndex()
+// ['a', 'b', 'c'] => [['a', 0], ['b', 1], ['c', 2]]
+```
+
+### zipWith()
+
+Zip with another stream using combining function.
+
+```typescript
+stream.zipWith(otherStream, (a, b) => a + b)
+```
+
+### zipLatest()
+
+Zip using latest value from each stream.
+
+```typescript
+stream.zipLatest(otherStream)
+```
+
+### zipAll()
+
+Zip with padding for unequal length streams.
+
+```typescript
+stream.zipAll(otherStream, 'defaultA', 'defaultB')
+```
+
+### interleave()
+
+Interleave values from multiple streams.
+
+```typescript
+stream.interleave(stream2, stream3)
+```
+
+### cross()
+
+Cartesian product of two streams.
+
+```typescript
+stream.cross(otherStream)
+// [1, 2] × ['a', 'b'] => [[1, 'a'], [1, 'b'], [2, 'a'], [2, 'b']]
+```
+
+### collect()
+
+Collect values using a partial function.
+
+```typescript
+stream.collect(x => {
+  const n = parseInt(x)
+  return isNaN(n) ? undefined : n
+})
+```
+
+### collectWhile()
+
+Collect while partial function returns defined values.
+
+```typescript
+stream.collectWhile(x => x < 100 ? x : undefined)
+```
+
+### grouped()
+
+Group elements into fixed-size chunks (alias for buffer).
+
+```typescript
+stream.grouped(5)
+```
+
+### groupedWithin()
+
+Group by size and/or time window.
+
+```typescript
+stream.groupedWithin(10, 1000)
+// Group max 10 items or 1 second
+```
+
+### groupByKey()
+
+Group elements by key into separate streams.
+
+```typescript
+const { groups, done } = stream.groupByKey(x => x.category)
+const evenStream = groups.get('even')
+const oddStream = groups.get('odd')
+```
+
+<ResponseField name="groups" type="Map<K, Stream<T>>">
+  Map of group keys to streams
+</ResponseField>
+
+<ResponseField name="done" type="Promise<void>">
+  Promise that resolves when distribution is complete
+</ResponseField>
+
+## Advanced Operations
+
+### switchMap()
+
+Cancel previous inner stream when new outer value arrives.
+
+```typescript
+stream.switchMap(value => fetchPages(value))
+```
+
+### concatMap()
+
+Sequential flatMap - wait for each inner iterable to complete.
+
+```typescript
+stream.concatMap(url => fetchPages(url))
+```
+
+### exhaustMap()
+
+Ignore new emissions while processing.
+
+```typescript
+stream.exhaustMap(query => fetchResults(query))
+```
+
+### pairwise()
+
+Emit [previous, current] tuples.
+
+```typescript
+stream.pairwise()
+// [1, 2, 3, 4] => [[1, 2], [2, 3], [3, 4]]
+```
+
+### window()
+
+Sliding window of elements.
+
+```typescript
+stream.window(3)
+// [1, 2, 3, 4, 5] => [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+```
+
+<ParamField path="size" type="number" required>
+  Window size
+</ParamField>
+
+### share()
+
+Multicast to multiple subscribers.
+
+```typescript
+const shared = stream.share({ bufferSize: 1 })
+shared.forEach(v => console.log('A:', v))
+shared.forEach(v => console.log('B:', v))
+```
+
+## Splitting Operations
+
+### partition()
+
+Partition stream into two based on predicate.
+
+```typescript
+const [evens, odds] = stream.partition(n => n % 2 === 0)
+```
+
+<ParamField path="predicate" type="(value: T) => boolean" required>
+  Predicate to split values
+</ParamField>
+
+<ParamField path="options.bufferSize" type="number">
+  Buffer size for each partition (default: 16)
+</ParamField>
+
+<ResponseField name="[Stream<T>, Stream<T>]" type="[Stream<T>, Stream<T>]">
+  Tuple of [pass, fail] streams
+</ResponseField>
+
+### splitAt()
+
+Split stream at position n.
+
+```typescript
+const [head, tail] = stream.splitAt(5)
+```
+
+### broadcast()
+
+Broadcast stream to N consumers.
+
+```typescript
+const [s1, s2, s3] = stream.broadcast(3)
+```
+
+<ParamField path="n" type="number" required>
+  Number of output streams
+</ParamField>
+
+<ParamField path="options.bufferSize" type="number">
+  Buffer size per stream (default: 0)
+</ParamField>
+
+## Terminal Operations
+
+### toArray()
+
+Collect all values into an array.
+
+```typescript
+const [err, results] = await stream.toArray()
+```
+
+<ResponseField name="Result<Error, T[]>" type="Result<Error, T[]>">
+  Result tuple containing error or array of values
+</ResponseField>
+
+### forEach()
+
+Execute effect for each value.
+
+```typescript
+const [err] = await stream.forEach(value => {
+  console.log('Value:', value)
+})
+```
+
+<ParamField path="fn" type="(value: T) => void | Promise<void>" required>
+  Effect function for each element
+</ParamField>
+
+### drain()
+
+Consume stream without collecting values.
+
+```typescript
+const [err] = await stream.drain()
+```
+
+### fold()
+
+Fold stream into single value.
+
+```typescript
+const [err, sum] = await stream.fold(0, (acc, val) => acc + val)
+```
+
+<ParamField path="initial" type="R" required>
+  Initial accumulator value
+</ParamField>
+
+<ParamField path="fn" type="(acc: R, value: T) => R" required>
+  Accumulator function
+</ParamField>
+
+### reduce()
+
+Reduce stream to single value (no initial value).
+
+```typescript
+const [err, result] = await stream.reduce((acc, val) => acc + val)
+```
+
+### count()
+
+Count elements in stream.
+
+```typescript
+const [err, count] = await stream.count()
+```
+
+### find()
+
+Find first element matching predicate.
+
+```typescript
+const [err, found] = await stream.find(x => x > 10)
+```
+
+### first()
+
+Get first element.
+
+```typescript
+const [err, first] = await stream.first()
+```
+
+### last()
+
+Get last element.
+
+```typescript
+const [err, last] = await stream.last()
+```
+
+### elementAt()
+
+Get element at specific index.
+
+```typescript
+const [err, element] = await stream.elementAt(5)
+```
+
+### some()
+
+Check if any element satisfies predicate.
+
+```typescript
+const [err, hasAny] = await stream.some(x => x > 100)
+```
+
+### every()
+
+Check if all elements satisfy predicate.
+
+```typescript
+const [err, allMatch] = await stream.every(x => x > 0)
+```
+
+### includes()
+
+Check if stream includes a value.
+
+```typescript
+const [err, hasValue] = await stream.includes(42)
+```
+
+### groupBy()
+
+Group elements by key into Map.
+
+```typescript
+const [err, groups] = await stream.groupBy(x => x.category)
+```
+
+### sum()
+
+Sum all numeric values.
+
+```typescript
+const [err, total] = await stream.sum()
+```
+
+### avg()
+
+Calculate average of numeric values.
+
+```typescript
+const [err, average] = await stream.avg()
+```
+
+### max()
+
+Get maximum value.
+
+```typescript
+const [err, maximum] = await stream.max()
+```
+
+### min()
+
+Get minimum value.
+
+```typescript
+const [err, minimum] = await stream.min()
+```
+
+## Utility Operations
+
+### pipe()
+
+Pipe stream through transformation functions.
+
+```typescript
+const result = await stream
+  .pipe(
+    s => s.filter(x => x > 0),
+    s => s.map(x => x * 2),
+    s => s.take(10)
+  )
+  .toArray()
+```
+
+### retry()
+
+Retry stream on failure.
+
+```typescript
+stream.retry({ maxRetries: 3, delay: 1000 })
+```
+
+<ParamField path="options.maxRetries" type="number">
+  Maximum retry attempts (default: 3)
+</ParamField>
+
+<ParamField path="options.delay" type="number">
+  Delay between retries in milliseconds (default: 0)
+</ParamField>
+
+## Stream Plugin
+
+Add stream support directly to scope:
+
+```typescript
+import { scope } from 'go-go-scope'
+import { streamPlugin } from '@go-go-scope/stream'
+
+const s = scope({ plugins: [streamPlugin] })
+const stream = s.stream([1, 2, 3])
+```
+
+## Examples
+
+### Basic Data Processing
+
+```typescript
+await using s = scope()
+
+const [err, results] = await s.stream(users)
+  .filter(user => user.active)
+  .map(user => user.email)
+  .distinct()
+  .toArray()
+```
+
+### Rate-Limited API Calls
+
+```typescript
+await using s = scope()
+
+const [err] = await s.stream(urls)
+  .throttle({ limit: 5, interval: 1000 }) // 5 requests/sec
+  .flatMap(url => fetch(url).then(r => r.json()))
+  .forEach(data => processData(data))
+```
+
+### Error Recovery
+
+```typescript
+await using s = scope()
+
+const [err, data] = await s.stream(fetchData())
+  .retry({ maxRetries: 3, delay: 1000 })
+  .catchAll(error => {
+    console.error('Failed:', error)
+    return [{ fallback: true }]
+  })
+  .toArray()
+```
+
+### Windowed Processing
+
+```typescript
+await using s = scope()
+
+const [err] = await s.stream(sensorData)
+  .window(5)
+  .map(window => {
+    const avg = window.reduce((a, b) => a + b, 0) / window.length
+    return { average: avg, samples: window.length }
+  })
+  .forEach(stats => console.log(stats))
+```
+
+### Parallel Processing with Grouping
+
+```typescript
+await using s = scope()
+
+const { groups, done } = s.stream(tasks).groupByKey(t => t.priority)
+
+// Process each priority in parallel
+await Promise.all([
+  groups.get('high').forEach(t => processHighPriority(t)),
+  groups.get('medium').forEach(t => processMediumPriority(t)),
+  groups.get('low').forEach(t => processLowPriority(t))
+])
+
+await done
+```

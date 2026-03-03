@@ -1,0 +1,659 @@
+---
+title: 'ResourcePool'
+description: 'Managed pool of resources with automatic lifecycle management'
+---
+
+## Overview
+
+The `ResourcePool` class manages a pool of reusable resources (database connections, HTTP clients, worker threads, etc.) with automatic lifecycle management, health checks, and cleanup.
+
+<Info>
+Resource pools are useful for managing expensive-to-create resources that can be reused across multiple operations.
+</Info>
+
+## Creation
+
+Resource pools are created using `scope.pool()`:
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: async () => {
+    const conn = await createDatabaseConnection()
+    return conn
+  },
+  destroy: async (conn) => {
+    await conn.close()
+  },
+  min: 2,
+  max: 10,
+  acquireTimeout: 5000,
+  healthCheck: async (conn) => {
+    try {
+      await conn.query('SELECT 1')
+      return { healthy: true }
+    } catch (err) {
+      return { healthy: false, message: err.message }
+    }
+  },
+  healthCheckInterval: 30000  // Check every 30s
+})
+```
+
+<ParamField path="options" type="ResourcePoolOptions<T>" required>
+  Resource pool configuration
+
+  <Expandable title="properties">
+    <ParamField path="create" type="() => Promise<T>" required>
+      Factory function to create a new resource
+    </ParamField>
+
+    <ParamField path="destroy" type="(resource: T) => Promise<void> | void" required>
+      Cleanup function to destroy a resource
+    </ParamField>
+
+    <ParamField path="min" type="number">
+      Minimum number of resources to maintain. Default: 0
+    </ParamField>
+
+    <ParamField path="max" type="number" required>
+      Maximum number of resources in the pool
+    </ParamField>
+
+    <ParamField path="acquireTimeout" type="number">
+      Maximum time to wait for resource acquisition in milliseconds. Default: 30000
+    </ParamField>
+
+    <ParamField path="healthCheck" type="(resource: T) => Promise<HealthCheckResult>">
+      Optional health check function to validate resources
+    </ParamField>
+
+    <ParamField path="healthCheckInterval" type="number">
+      Interval between periodic health checks in milliseconds. Only used if healthCheck is provided. Default: 30000
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="pool" type="ResourcePool<T>">
+  A new ResourcePool instance
+</ResponseField>
+
+## Core Methods
+
+### acquire()
+
+Acquire a resource from the pool. Blocks if no resources are available.
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 10
+})
+
+const conn = await pool.acquire()
+try {
+  const result = await conn.query('SELECT * FROM users')
+  console.log(result)
+} finally {
+  // Must release!
+  await pool.release(conn)
+}
+```
+
+<ResponseField name="resource" type="Promise<T>">
+  Acquired resource
+</ResponseField>
+
+<Warning>
+Always release acquired resources using `release()`. Consider using `execute()` for automatic cleanup.
+</Warning>
+
+### release()
+
+Release a resource back to the pool.
+
+```typescript
+const conn = await pool.acquire()
+try {
+  await conn.query('SELECT 1')
+} finally {
+  await pool.release(conn)
+}
+```
+
+<ParamField path="resource" type="T" required>
+  Resource to release
+</ParamField>
+
+### execute()
+
+Acquire a resource, execute a function, and automatically release.
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 10
+})
+
+const result = await pool.execute(async (conn) => {
+  return await conn.query('SELECT * FROM users')
+})
+
+// Resource automatically released
+```
+
+<ParamField path="fn" type="(resource: T) => Promise<R>" required>
+  Function to execute with acquired resource
+</ParamField>
+
+<ResponseField name="result" type="Promise<R>">
+  Function result
+</ResponseField>
+
+### initialize()
+
+Manually initialize the pool with minimum resources.
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  min: 5,
+  max: 20
+})
+
+// Pre-create minimum resources
+await pool.initialize()
+
+console.log(pool.stats.total)  // 5
+```
+
+<Note>
+The pool automatically initializes on first `acquire()` if not already initialized.
+</Note>
+
+### checkHealth()
+
+Manually trigger a health check on all resources.
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 10,
+  healthCheck: async (conn) => {
+    try {
+      await conn.ping()
+      return { healthy: true }
+    } catch {
+      return { healthy: false }
+    }
+  }
+})
+
+// Manually check health
+const unhealthyCount = await pool.checkHealth()
+console.log(`Removed ${unhealthyCount} unhealthy resources`)
+```
+
+<ResponseField name="unhealthyCount" type="Promise<number>">
+  Number of unhealthy resources found and removed
+</ResponseField>
+
+## Properties
+
+### stats
+
+Pool statistics.
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  min: 2,
+  max: 10
+})
+
+await pool.initialize()
+
+const stats = pool.stats
+console.log(stats)
+// {
+//   total: 2,
+//   available: 2,
+//   inUse: 0,
+//   waiting: 0,
+//   creating: 0,
+//   unhealthy: 0,
+//   healthChecksEnabled: false
+// }
+```
+
+<ResponseField name="stats" type="PoolStats">
+  <Expandable title="properties">
+    <ResponseField name="total" type="number">
+      Total number of resources in pool
+    </ResponseField>
+
+    <ResponseField name="available" type="number">
+      Number of available resources
+    </ResponseField>
+
+    <ResponseField name="inUse" type="number">
+      Number of resources currently in use
+    </ResponseField>
+
+    <ResponseField name="waiting" type="number">
+      Number of tasks waiting to acquire a resource
+    </ResponseField>
+
+    <ResponseField name="creating" type="number">
+      Number of resources currently being created
+    </ResponseField>
+
+    <ResponseField name="unhealthy" type="number">
+      Number of resources that failed health checks
+    </ResponseField>
+
+    <ResponseField name="healthChecksEnabled" type="boolean">
+      Whether health checks are enabled
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Health Checks
+
+### Periodic Health Checks
+
+Automatically validate resources at regular intervals:
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 10,
+  healthCheck: async (conn) => {
+    try {
+      await conn.query('SELECT 1')
+      return { healthy: true }
+    } catch (err) {
+      return {
+        healthy: false,
+        message: `Health check failed: ${err.message}`
+      }
+    }
+  },
+  healthCheckInterval: 30000  // Check every 30 seconds
+})
+
+// Unhealthy resources are automatically removed and replaced
+```
+
+### Manual Health Checks
+
+```typescript
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 10,
+  healthCheck: async (conn) => {
+    const isConnected = await conn.isConnected()
+    return { healthy: isConnected }
+  }
+})
+
+// Trigger health check manually
+const removed = await pool.checkHealth()
+console.log(`Removed ${removed} unhealthy connections`)
+
+// Pool automatically replenishes to maintain min size
+```
+
+## Patterns
+
+### Database Connection Pool
+
+```typescript
+import { scope } from 'go-go-scope'
+import { createConnection } from 'mysql2/promise'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: async () => {
+    const conn = await createConnection({
+      host: 'localhost',
+      user: 'root',
+      database: 'mydb'
+    })
+    return conn
+  },
+  destroy: async (conn) => {
+    await conn.end()
+  },
+  min: 5,
+  max: 20,
+  acquireTimeout: 5000,
+  healthCheck: async (conn) => {
+    try {
+      await conn.ping()
+      return { healthy: true }
+    } catch (err) {
+      return { healthy: false, message: err.message }
+    }
+  },
+  healthCheckInterval: 30000
+})
+
+// Use the pool
+const users = await pool.execute(async (conn) => {
+  const [rows] = await conn.query('SELECT * FROM users')
+  return rows
+})
+```
+
+### HTTP Client Pool
+
+```typescript
+import { scope } from 'go-go-scope'
+import axios from 'axios'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: async () => {
+    return axios.create({
+      baseURL: 'https://api.example.com',
+      timeout: 5000,
+      headers: { 'User-Agent': 'MyApp/1.0' }
+    })
+  },
+  destroy: async (client) => {
+    // Cleanup if needed
+  },
+  min: 2,
+  max: 10,
+  healthCheck: async (client) => {
+    try {
+      await client.get('/health')
+      return { healthy: true }
+    } catch {
+      return { healthy: false }
+    }
+  },
+  healthCheckInterval: 60000
+})
+
+const data = await pool.execute(async (client) => {
+  const response = await client.get('/api/data')
+  return response.data
+})
+```
+
+### Worker Thread Pool
+
+```typescript
+import { scope } from 'go-go-scope'
+import { Worker } from 'worker_threads'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: async () => {
+    return new Worker('./worker.js')
+  },
+  destroy: async (worker) => {
+    await worker.terminate()
+  },
+  min: 4,
+  max: 16,
+  healthCheck: async (worker) => {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve({ healthy: false, message: 'Health check timeout' })
+      }, 1000)
+      
+      worker.once('message', (msg) => {
+        clearTimeout(timeout)
+        if (msg === 'pong') {
+          resolve({ healthy: true })
+        } else {
+          resolve({ healthy: false })
+        }
+      })
+      
+      worker.postMessage('ping')
+    })
+  },
+  healthCheckInterval: 30000
+})
+
+const result = await pool.execute(async (worker) => {
+  return new Promise((resolve, reject) => {
+    worker.once('message', resolve)
+    worker.once('error', reject)
+    worker.postMessage({ task: 'compute', data: [1, 2, 3] })
+  })
+})
+```
+
+### Redis Connection Pool
+
+```typescript
+import { scope } from 'go-go-scope'
+import { createClient } from 'redis'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: async () => {
+    const client = createClient({
+      url: 'redis://localhost:6379'
+    })
+    await client.connect()
+    return client
+  },
+  destroy: async (client) => {
+    await client.disconnect()
+  },
+  min: 3,
+  max: 15,
+  acquireTimeout: 3000,
+  healthCheck: async (client) => {
+    try {
+      await client.ping()
+      return { healthy: true }
+    } catch (err) {
+      return { healthy: false, message: err.message }
+    }
+  },
+  healthCheckInterval: 20000
+})
+
+// Get value
+const value = await pool.execute(async (client) => {
+  return await client.get('mykey')
+})
+
+// Set value
+await pool.execute(async (client) => {
+  await client.set('mykey', 'myvalue')
+})
+```
+
+### Resource Pool with Metrics
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: async () => {
+    const start = Date.now()
+    const conn = await createConnection()
+    metrics.histogram('pool.create.duration', Date.now() - start)
+    return conn
+  },
+  destroy: async (conn) => {
+    const start = Date.now()
+    await conn.close()
+    metrics.histogram('pool.destroy.duration', Date.now() - start)
+  },
+  min: 5,
+  max: 20,
+  healthCheck: async (conn) => {
+    try {
+      await conn.ping()
+      metrics.increment('pool.health_check.success')
+      return { healthy: true }
+    } catch (err) {
+      metrics.increment('pool.health_check.failure')
+      return { healthy: false, message: err.message }
+    }
+  },
+  healthCheckInterval: 30000
+})
+
+// Track pool metrics
+setInterval(() => {
+  const stats = pool.stats
+  metrics.gauge('pool.total', stats.total)
+  metrics.gauge('pool.available', stats.available)
+  metrics.gauge('pool.in_use', stats.inUse)
+  metrics.gauge('pool.waiting', stats.waiting)
+  metrics.gauge('pool.unhealthy', stats.unhealthy)
+}, 10000)
+```
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { scope } from 'go-go-scope'
+
+interface Connection {
+  query: (sql: string) => Promise<unknown[]>
+  close: () => Promise<void>
+}
+
+await using s = scope()
+
+const pool = s.pool<Connection>({
+  create: async () => {
+    console.log('Creating connection')
+    return await createConnection()
+  },
+  destroy: async (conn) => {
+    console.log('Destroying connection')
+    await conn.close()
+  },
+  min: 2,
+  max: 5
+})
+
+// Execute multiple queries
+const results = await Promise.all([
+  pool.execute((conn) => conn.query('SELECT * FROM users')),
+  pool.execute((conn) => conn.query('SELECT * FROM orders')),
+  pool.execute((conn) => conn.query('SELECT * FROM products'))
+])
+
+console.log(pool.stats)
+// { total: 3, available: 3, inUse: 0, ... }
+```
+
+### With Health Checks
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  min: 3,
+  max: 10,
+  healthCheck: async (conn) => {
+    try {
+      const result = await conn.query('SELECT 1')
+      return { healthy: true }
+    } catch (err) {
+      console.error('Health check failed:', err)
+      return {
+        healthy: false,
+        message: `Connection unhealthy: ${err.message}`
+      }
+    }
+  },
+  healthCheckInterval: 30000
+})
+
+// Unhealthy connections are automatically removed and replaced
+```
+
+### Manual Acquire/Release
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 10,
+  acquireTimeout: 5000
+})
+
+// Manual acquire/release
+const conn = await pool.acquire()
+try {
+  await conn.query('BEGIN')
+  await conn.query('INSERT INTO users VALUES (1, "Alice")')
+  await conn.query('INSERT INTO orders VALUES (1, 1, 100)')
+  await conn.query('COMMIT')
+} catch (err) {
+  await conn.query('ROLLBACK')
+  throw err
+} finally {
+  await pool.release(conn)
+}
+```
+
+### Timeout Handling
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope()
+
+const pool = s.pool({
+  create: () => createConnection(),
+  destroy: (conn) => conn.close(),
+  max: 2,
+  acquireTimeout: 3000  // 3 second timeout
+})
+
+// Hold both resources
+const conn1 = await pool.acquire()
+const conn2 = await pool.acquire()
+
+// This will timeout after 3 seconds
+try {
+  const conn3 = await pool.acquire()
+} catch (err) {
+  console.error('Timeout:', err.message)
+  // "Acquire timeout after 3000ms"
+}
+
+await pool.release(conn1)
+await pool.release(conn2)
+```

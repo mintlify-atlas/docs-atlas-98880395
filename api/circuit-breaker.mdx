@@ -1,0 +1,776 @@
+---
+title: 'CircuitBreaker'
+description: 'Fault tolerance pattern for preventing cascading failures'
+---
+
+## Overview
+
+The `CircuitBreaker` class implements the circuit breaker pattern to prevent cascading failures in distributed systems. It monitors failure rates and automatically stops executing operations when failures exceed a threshold, giving the system time to recover.
+
+## States
+
+A circuit breaker has three states:
+
+- **Closed**: Normal operation. Requests pass through. Failures are counted.
+- **Open**: Too many failures detected. All requests immediately fail without execution.
+- **Half-Open**: After reset timeout, circuit allows test requests. Success transitions to Closed, failure back to Open.
+
+```
+     [Closed] ---failures >= threshold---> [Open]
+         ^                                    |
+         |                                    | reset timeout
+         |                                    v
+         +------success threshold------ [Half-Open]
+                                             |
+                                             | failure
+                                             v
+                                           [Open]
+```
+
+## Creation
+
+### As Scope Option (Recommended)
+
+Apply circuit breaker to all tasks in a scope:
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope({
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeout: 30000,
+    successThreshold: 2,
+    onOpen: (failures) => {
+      console.log(`Circuit opened after ${failures} failures`)
+    },
+    onClose: () => {
+      console.log('Circuit closed')
+    }
+  }
+})
+
+// All tasks protected by circuit breaker
+const [err, result] = await s.task(() => unreliableApi())
+```
+
+### Standalone Circuit Breaker
+
+Create and use directly:
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000
+})
+
+try {
+  const result = await cb.execute(async (signal) => {
+    return await fetch('/api/data', { signal })
+  })
+} catch (err) {
+  if (err.message === 'Circuit breaker is open') {
+    console.log('Too many failures, circuit is open')
+  }
+}
+```
+
+## Configuration
+
+<ParamField path="options" type="CircuitBreakerOptions">
+  Circuit breaker configuration
+
+  <Expandable title="properties">
+    <ParamField path="failureThreshold" type="number">
+      Number of failures before opening circuit. Default: 5
+    </ParamField>
+
+    <ParamField path="resetTimeout" type="number">
+      Time in milliseconds before attempting to close. Default: 30000
+    </ParamField>
+
+    <ParamField path="successThreshold" type="number">
+      Consecutive successes in half-open state before closing. Default: 1
+    </ParamField>
+
+    <ParamField path="onStateChange" type="(from: CircuitState, to: CircuitState, failureCount: number) => void">
+      Called when circuit state changes
+    </ParamField>
+
+    <ParamField path="onOpen" type="(failureCount: number) => void">
+      Called when circuit opens
+    </ParamField>
+
+    <ParamField path="onClose" type="() => void">
+      Called when circuit closes
+    </ParamField>
+
+    <ParamField path="onHalfOpen" type="() => void">
+      Called when circuit enters half-open state
+    </ParamField>
+
+    <ParamField path="advanced" type="AdvancedOptions">
+      Advanced configuration options
+
+      <Expandable title="advanced properties">
+        <ParamField path="adaptiveThreshold" type="boolean">
+          Enable adaptive threshold based on error rate. Default: false
+        </ParamField>
+
+        <ParamField path="minThreshold" type="number">
+          Minimum failure threshold for adaptive mode. Default: 2
+        </ParamField>
+
+        <ParamField path="maxThreshold" type="number">
+          Maximum failure threshold for adaptive mode. Default: 10
+        </ParamField>
+
+        <ParamField path="errorRateWindowMs" type="number">
+          Window for calculating error rate. Default: 60000
+        </ParamField>
+
+        <ParamField path="onThresholdAdapt" type="(newThreshold: number, errorRate: number) => void">
+          Called when threshold adapts
+        </ParamField>
+
+        <ParamField path="slidingWindow" type="boolean">
+          Use sliding window for failure counting. Default: false
+        </ParamField>
+
+        <ParamField path="slidingWindowSizeMs" type="number">
+          Sliding window size in milliseconds. Default: 60000
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Methods
+
+### execute()
+
+Execute a function with circuit breaker protection.
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 3 })
+
+try {
+  const result = await cb.execute(async (signal) => {
+    return await fetch('/api/data', { signal })
+  })
+  console.log('Success:', result)
+} catch (err) {
+  if (err.message === 'Circuit breaker is open') {
+    console.log('Circuit is open, request rejected')
+  } else {
+    console.log('Request failed:', err)
+  }
+}
+```
+
+<ParamField path="fn" type="(signal: AbortSignal) => Promise<T>" required>
+  Function to execute with circuit protection
+</ParamField>
+
+<ResponseField name="result" type="Promise<T>">
+  Function result if successful
+</ResponseField>
+
+<Note>
+Throws error if circuit is open. Throws function error if execution fails.
+</Note>
+
+### reset()
+
+Manually reset the circuit breaker to closed state.
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 3 })
+
+// After many failures, circuit is open
+console.log(cb.currentState)  // 'open'
+
+// Manually reset
+cb.reset()
+
+console.log(cb.currentState)  // 'closed'
+console.log(cb.failureCount)  // 0
+```
+
+### on()
+
+Subscribe to circuit breaker events.
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 3 })
+
+const unsubscribe = cb.on('open', (failureCount) => {
+  console.log(`Circuit opened after ${failureCount} failures`)
+})
+
+cb.on('close', () => {
+  console.log('Circuit closed')
+})
+
+cb.on('halfOpen', () => {
+  console.log('Circuit half-open, testing requests')
+})
+
+cb.on('success', () => {
+  console.log('Request succeeded')
+})
+
+cb.on('failure', () => {
+  console.log('Request failed')
+})
+
+cb.on('thresholdAdapt', (newThreshold, errorRate) => {
+  console.log(`Threshold adapted to ${newThreshold} (error rate: ${errorRate})`)
+})
+
+// Later: unsubscribe
+unsubscribe()
+```
+
+<ParamField path="event" type="CircuitBreakerEvent" required>
+  Event name: 'stateChange', 'open', 'close', 'halfOpen', 'success', 'failure', 'thresholdAdapt'
+</ParamField>
+
+<ParamField path="handler" type="EventHandler" required>
+  Event handler function
+</ParamField>
+
+<ResponseField name="unsubscribe" type="() => void">
+  Function to unsubscribe from event
+</ResponseField>
+
+### off()
+
+Unsubscribe from a circuit breaker event.
+
+```typescript
+const handler = (failureCount: number) => {
+  console.log('Circuit opened:', failureCount)
+}
+
+cb.on('open', handler)
+
+// Later: unsubscribe
+cb.off('open', handler)
+```
+
+<ParamField path="event" type="CircuitBreakerEvent" required>
+  Event name
+</ParamField>
+
+<ParamField path="handler" type="EventHandler" required>
+  Handler to remove
+</ParamField>
+
+### once()
+
+Subscribe to an event once.
+
+```typescript
+cb.once('open', (failureCount) => {
+  console.log(`Circuit opened (only logged once): ${failureCount}`)
+})
+```
+
+<ParamField path="event" type="CircuitBreakerEvent" required>
+  Event name
+</ParamField>
+
+<ParamField path="handler" type="EventHandler" required>
+  Event handler
+</ParamField>
+
+## Properties
+
+### currentState
+
+Current circuit state.
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 3 })
+
+console.log(cb.currentState)  // 'closed'
+
+// After 3 failures
+console.log(cb.currentState)  // 'open'
+
+// After reset timeout
+console.log(cb.currentState)  // 'half-open'
+```
+
+<ResponseField name="currentState" type="'closed' | 'open' | 'half-open'">
+  Current state
+</ResponseField>
+
+### failureCount
+
+Current failure count (within sliding window if enabled).
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 5 })
+
+console.log(cb.failureCount)  // 0
+
+// After some failures
+console.log(cb.failureCount)  // 3
+```
+
+<ResponseField name="failureCount" type="number">
+  Number of failures
+</ResponseField>
+
+### successCount
+
+Consecutive success count (in half-open state).
+
+```typescript
+const cb = new CircuitBreaker({
+  failureThreshold: 3,
+  successThreshold: 2
+})
+
+// In half-open state
+console.log(cb.successCount)  // 0
+
+// After successful request
+console.log(cb.successCount)  // 1
+
+// After another success (closes circuit)
+console.log(cb.successCount)  // 0 (reset to closed)
+```
+
+<ResponseField name="successCount" type="number">
+  Consecutive successes in half-open state
+</ResponseField>
+
+### failureThreshold
+
+Failure threshold (adaptive if enabled).
+
+```typescript
+const cb = new CircuitBreaker({ failureThreshold: 5 })
+
+console.log(cb.failureThreshold)  // 5
+
+// With adaptive threshold
+const adaptiveCb = new CircuitBreaker({
+  failureThreshold: 5,
+  advanced: {
+    adaptiveThreshold: true,
+    minThreshold: 2,
+    maxThreshold: 10
+  }
+})
+
+// Threshold adjusts based on error rate
+console.log(adaptiveCb.failureThreshold)  // 2-10 (dynamic)
+```
+
+<ResponseField name="failureThreshold" type="number">
+  Current failure threshold
+</ResponseField>
+
+### successThreshold
+
+Success threshold for closing from half-open.
+
+```typescript
+const cb = new CircuitBreaker({ successThreshold: 3 })
+
+console.log(cb.successThreshold)  // 3
+```
+
+<ResponseField name="successThreshold" type="number">
+  Success threshold
+</ResponseField>
+
+### resetTimeout
+
+Reset timeout in milliseconds.
+
+```typescript
+const cb = new CircuitBreaker({ resetTimeout: 30000 })
+
+console.log(cb.resetTimeout)  // 30000
+```
+
+<ResponseField name="resetTimeout" type="number">
+  Reset timeout in milliseconds
+</ResponseField>
+
+### isAdaptiveEnabled
+
+Whether adaptive threshold is enabled.
+
+```typescript
+const cb = new CircuitBreaker({
+  advanced: { adaptiveThreshold: true }
+})
+
+console.log(cb.isAdaptiveEnabled)  // true
+```
+
+<ResponseField name="isAdaptiveEnabled" type="boolean">
+  True if adaptive threshold is enabled
+</ResponseField>
+
+### isSlidingWindowEnabled
+
+Whether sliding window is enabled.
+
+```typescript
+const cb = new CircuitBreaker({
+  advanced: { slidingWindow: true }
+})
+
+console.log(cb.isSlidingWindowEnabled)  // true
+```
+
+<ResponseField name="isSlidingWindowEnabled" type="boolean">
+  True if sliding window is enabled
+</ResponseField>
+
+### errorRate
+
+Current error rate (for adaptive threshold).
+
+```typescript
+const cb = new CircuitBreaker({
+  advanced: { adaptiveThreshold: true }
+})
+
+console.log(cb.errorRate)  // 0.0 - 1.0
+```
+
+<ResponseField name="errorRate" type="number">
+  Error rate (0-1)
+</ResponseField>
+
+## Advanced Features
+
+### Adaptive Threshold
+
+Dynamically adjust failure threshold based on error rate:
+
+```typescript
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  advanced: {
+    adaptiveThreshold: true,
+    minThreshold: 2,
+    maxThreshold: 10,
+    errorRateWindowMs: 60000,
+    onThresholdAdapt: (threshold, errorRate) => {
+      console.log(`Threshold: ${threshold}, Error rate: ${errorRate}%`)
+    }
+  }
+})
+
+// High error rate -> lower threshold (faster circuit opening)
+// Low error rate -> higher threshold (more tolerant)
+```
+
+### Sliding Window
+
+Count failures within a time window instead of fixed count:
+
+```typescript
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  advanced: {
+    slidingWindow: true,
+    slidingWindowSizeMs: 60000  // 1 minute
+  }
+})
+
+// Only failures in last 60 seconds count toward threshold
+```
+
+### Success Threshold
+
+Require multiple successes in half-open before closing:
+
+```typescript
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  successThreshold: 3,  // Need 3 consecutive successes
+  resetTimeout: 30000
+})
+
+// After reset timeout:
+// - 1st success: stays half-open
+// - 2nd success: stays half-open
+// - 3rd success: closes circuit
+// - Any failure: back to open
+```
+
+## Patterns
+
+### API Circuit Breaker
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope({
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeout: 30000,
+    onOpen: () => {
+      console.log('API circuit opened - too many failures')
+      // Trigger alert, fallback, etc.
+    }
+  }
+})
+
+const fetchUser = async (id: string) => {
+  const [err, user] = await s.task(
+    async ({ signal }) => {
+      const response = await fetch(`/api/users/${id}`, { signal })
+      return response.json()
+    }
+  )
+  
+  if (err?.message === 'Circuit breaker is open') {
+    // Use cached data or return error
+    return getCachedUser(id)
+  }
+  
+  return user
+}
+```
+
+### Database Circuit Breaker
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope({
+  circuitBreaker: {
+    failureThreshold: 3,
+    resetTimeout: 60000,
+    onOpen: (failures) => {
+      console.error(`Database circuit opened after ${failures} failures`)
+      // Switch to read replica, enable read-only mode, etc.
+    },
+    onClose: () => {
+      console.log('Database circuit closed - resuming normal operation')
+    }
+  }
+})
+  .provide('db', database)
+
+const query = async (sql: string) => {
+  const [err, result] = await s.task(
+    async ({ services }) => {
+      return await services.db.query(sql)
+    }
+  )
+  
+  if (err) {
+    throw err
+  }
+  
+  return result
+}
+```
+
+### Microservice Circuit Breaker
+
+```typescript
+import { scope } from 'go-go-scope'
+
+class UserService {
+  private scope = scope({
+    circuitBreaker: {
+      failureThreshold: 5,
+      resetTimeout: 30000,
+      successThreshold: 2,
+      advanced: {
+        adaptiveThreshold: true,
+        minThreshold: 2,
+        maxThreshold: 10
+      }
+    }
+  })
+  
+  async getUser(id: string) {
+    const [err, user] = await this.scope.task(
+      async ({ signal }) => {
+        const response = await fetch(`${this.apiUrl}/users/${id}`, { signal })
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        return response.json()
+      }
+    )
+    
+    if (err?.message === 'Circuit breaker is open') {
+      // Service degradation - use fallback
+      return this.getUserFromCache(id)
+    }
+    
+    if (err) {
+      throw err
+    }
+    
+    return user
+  }
+}
+```
+
+### Multi-Level Circuit Breakers
+
+```typescript
+import { scope } from 'go-go-scope'
+
+// Parent scope with conservative circuit breaker
+await using parent = scope({
+  name: 'api-gateway',
+  circuitBreaker: {
+    failureThreshold: 10,
+    resetTimeout: 60000
+  }
+})
+
+// Child scopes with aggressive circuit breakers
+const userService = parent.createChild({
+  name: 'user-service',
+  circuitBreaker: {
+    failureThreshold: 3,
+    resetTimeout: 30000
+  }
+})
+
+const orderService = parent.createChild({
+  name: 'order-service',
+  circuitBreaker: {
+    failureThreshold: 3,
+    resetTimeout: 30000
+  }
+})
+
+// If user service fails too much, its circuit opens
+// If both services fail, parent circuit opens
+```
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+
+const cb = new CircuitBreaker({
+  failureThreshold: 3,
+  resetTimeout: 10000
+})
+
+for (let i = 0; i < 10; i++) {
+  try {
+    const result = await cb.execute(async () => {
+      return await unreliableApi()
+    })
+    console.log('Success:', result)
+  } catch (err) {
+    if (err.message === 'Circuit breaker is open') {
+      console.log('Circuit is open, using fallback')
+      // Use cached data or alternative
+    } else {
+      console.log('Request failed:', err.message)
+    }
+  }
+  
+  await sleep(1000)
+}
+```
+
+### With Scope
+
+```typescript
+import { scope } from 'go-go-scope'
+
+await using s = scope({
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeout: 30000,
+    onStateChange: (from, to, failures) => {
+      console.log(`Circuit: ${from} -> ${to} (${failures} failures)`)
+    }
+  }
+})
+
+const results = await s.parallel(
+  Array.from({ length: 100 }, () => async () => {
+    return await unreliableApi()
+  })
+)
+
+// If too many failures, circuit opens and remaining requests fail fast
+```
+
+### With Adaptive Threshold
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+
+const cb = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000,
+  advanced: {
+    adaptiveThreshold: true,
+    minThreshold: 2,
+    maxThreshold: 10,
+    errorRateWindowMs: 60000,
+    onThresholdAdapt: (threshold, errorRate) => {
+      console.log(`Adapted threshold to ${threshold} (error rate: ${(errorRate * 100).toFixed(1)}%)`)
+    }
+  }
+})
+
+// Threshold adapts based on error rate:
+// - 0% error rate -> threshold = 10 (tolerant)
+// - 25% error rate -> threshold = 6
+// - 50%+ error rate -> threshold = 2 (strict)
+```
+
+### With Event Handlers
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+
+const cb = new CircuitBreaker({
+  failureThreshold: 3,
+  resetTimeout: 10000
+})
+
+cb.on('open', (failures) => {
+  console.log(`Circuit opened after ${failures} failures`)
+  // Trigger alert
+  alerting.send({ level: 'critical', message: 'Circuit breaker opened' })
+})
+
+cb.on('halfOpen', () => {
+  console.log('Circuit half-open, testing requests')
+})
+
+cb.on('close', () => {
+  console.log('Circuit closed, normal operation resumed')
+  // Clear alert
+  alerting.send({ level: 'info', message: 'Circuit breaker closed' })
+})
+
+cb.on('failure', () => {
+  metrics.increment('circuit_breaker.failures')
+})
+
+cb.on('success', () => {
+  metrics.increment('circuit_breaker.successes')
+})
+```

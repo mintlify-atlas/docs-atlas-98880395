@@ -1,0 +1,281 @@
+---
+title: "Health Checks"
+description: "Parallel health check pattern for monitoring service dependencies with timeouts and graceful degradation"
+---
+
+# Health Check Pattern
+
+Implement robust health checks that verify multiple service dependencies in parallel with proper timeout handling and structured error reporting.
+
+## Basic Health Check
+
+Check multiple dependencies concurrently with automatic cleanup:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+interface HealthCheckResult {
+  service: string;
+  healthy: boolean;
+  latency: number;
+  error?: string;
+}
+
+async function healthCheck(): Promise<HealthCheckResult[]> {
+  await using s = scope({ timeout: 5000 });
+
+  const checks = [
+    { name: 'database', fn: () => checkDatabase() },
+    { name: 'redis', fn: () => checkRedis() },
+    { name: 'api', fn: () => checkExternalAPI() },
+  ];
+
+  const results = await s.parallel(
+    checks.map(({ name, fn }) => async (signal) => {
+      const start = Date.now();
+      try {
+        await fn();
+        return {
+          service: name,
+          healthy: true,
+          latency: Date.now() - start,
+        };
+      } catch (error) {
+        return {
+          service: name,
+          healthy: false,
+          latency: Date.now() - start,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        };
+      }
+    }),
+    { continueOnError: true }
+  );
+
+  return results.map(([_, result]) => result!);
+}
+
+// Example usage
+const health = await healthCheck();
+console.log('System health:', health);
+```
+
+## Deep Health Checks
+
+<Steps>
+  <Step title="Define health check interface">
+    Create a standardized interface for all health checks:
+
+    ```typescript
+    interface DetailedHealthCheck {
+      check(signal: AbortSignal): Promise<HealthStatus>;
+    }
+
+    interface HealthStatus {
+      status: 'healthy' | 'degraded' | 'unhealthy';
+      latency: number;
+      metadata?: Record<string, unknown>;
+      error?: string;
+    }
+    ```
+  </Step>
+
+  <Step title="Implement database health check">
+    Check database connectivity and query performance:
+
+    ```typescript
+    class DatabaseHealthCheck implements DetailedHealthCheck {
+      async check(signal: AbortSignal): Promise<HealthStatus> {
+        const start = Date.now();
+        
+        try {
+          // Simple ping query
+          await db.query('SELECT 1', { signal });
+          
+          const latency = Date.now() - start;
+          
+          return {
+            status: latency < 100 ? 'healthy' : 'degraded',
+            latency,
+            metadata: {
+              connectionPool: db.pool.size,
+              activeConnections: db.pool.active,
+            },
+          };
+        } catch (error) {
+          return {
+            status: 'unhealthy',
+            latency: Date.now() - start,
+            error: error instanceof Error ? error.message : 'Database unreachable',
+          };
+        }
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Aggregate health results">
+    Combine multiple checks with proper error handling:
+
+    ```typescript
+    async function systemHealthCheck() {
+      await using s = scope({ timeout: 10000 });
+
+      const checks = [
+        new DatabaseHealthCheck(),
+        new RedisHealthCheck(),
+        new APIHealthCheck(),
+      ];
+
+      const results = await s.parallel(
+        checks.map((check) => (signal) => check.check(signal)),
+        { 
+          continueOnError: true,
+          onProgress: (completed, total) => {
+            console.log(`Health checks: ${completed}/${total}`);
+          },
+        }
+      );
+
+      // Determine overall system health
+      const statuses = results.map(([_, status]) => status!);
+      const hasUnhealthy = statuses.some(s => s.status === 'unhealthy');
+      const hasDegraded = statuses.some(s => s.status === 'degraded');
+
+      return {
+        overall: hasUnhealthy ? 'unhealthy' : hasDegraded ? 'degraded' : 'healthy',
+        checks: statuses,
+        timestamp: new Date().toISOString(),
+      };
+    }
+    ```
+  </Step>
+</Steps>
+
+## Continuous Health Monitoring
+
+Set up periodic health checks with automatic retry:
+
+<CodeGroup>
+```typescript Polling Pattern
+import { scope } from 'go-go-scope';
+
+async function startHealthMonitoring() {
+  await using s = scope();
+
+  // Poll health every 30 seconds
+  const monitor = s.poll(
+    async (signal) => {
+      const health = await healthCheck();
+      
+      // Alert if any service is unhealthy
+      const unhealthy = health.filter(h => !h.healthy);
+      if (unhealthy.length > 0) {
+        await sendAlert({
+          level: 'warning',
+          services: unhealthy.map(h => h.service),
+          timestamp: Date.now(),
+        });
+      }
+      
+      return health;
+    },
+    { interval: 30000 }
+  );
+
+  // Monitor runs until scope is disposed
+  await monitor.start();
+}
+```
+
+```typescript Channel-based Monitoring
+import { scope } from 'go-go-scope';
+
+async function healthMonitorWithChannel() {
+  await using s = scope();
+
+  const healthCh = s.channel<HealthCheckResult[]>(10);
+
+  // Producer: Run health checks
+  s.task(async ({ signal }) => {
+    while (!signal.aborted) {
+      const results = await healthCheck();
+      await healthCh.send(results);
+      await new Promise(r => setTimeout(r, 30000));
+    }
+  });
+
+  // Consumer: Process health results
+  s.task(async () => {
+    for await (const health of healthCh) {
+      const unhealthy = health.filter(h => !h.healthy);
+      
+      if (unhealthy.length > 0) {
+        console.error('Unhealthy services:', unhealthy);
+        // Trigger alerts, update metrics, etc.
+      }
+    }
+  });
+}
+```
+</CodeGroup>
+
+## Circuit Breaker Integration
+
+Combine health checks with circuit breakers for automatic failover:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+async function createResilientHealthCheck() {
+  await using s = scope({
+    circuitBreaker: {
+      failureThreshold: 3,
+      resetTimeout: 30000,
+    },
+  });
+
+  // Health check task with circuit breaker protection
+  const [err, result] = await s.task(
+    async ({ signal }) => {
+      const health = await healthCheck();
+      
+      // Circuit opens if too many services are unhealthy
+      const unhealthyCount = health.filter(h => !h.healthy).length;
+      if (unhealthyCount > health.length / 2) {
+        throw new Error(`System degraded: ${unhealthyCount} services down`);
+      }
+      
+      return health;
+    },
+    {
+      retry: {
+        maxRetries: 3,
+        delay: (attempt) => attempt * 1000,
+      },
+    }
+  );
+
+  if (err) {
+    console.error('Health check failed:', err);
+    return [];
+  }
+
+  return result;
+}
+```
+
+## Best Practices
+
+- **Set reasonable timeouts**: Health checks should fail fast (2-5 seconds)
+- **Continue on error**: Use `continueOnError: true` to get partial results
+- **Monitor latency**: Track response times to detect degradation early
+- **Graceful degradation**: Return partial results instead of failing completely
+- **Cache results**: Cache health check results briefly to reduce load
+- **Exponential backoff**: Use retry strategies for transient failures
+
+## Related Patterns
+
+- [Retry Strategies](/examples/retry-strategies) - Implement retry logic for failed checks
+- [Rate Limiting](/examples/rate-limiting) - Prevent overwhelming services with checks
+- [Circuit Breaker](https://github.com/thelinuxlich/go-go-scope/blob/main/docs/05-resilience-patterns.md) - Automatic failover for unhealthy services

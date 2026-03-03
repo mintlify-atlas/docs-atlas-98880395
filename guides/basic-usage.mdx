@@ -1,0 +1,363 @@
+---
+title: "Basic Usage"
+description: "Common patterns for tasks, timeouts, retries, and error handling with go-go-scope"
+---
+
+## Getting Started
+
+go-go-scope provides structured concurrency using TypeScript's Explicit Resource Management (the `using` and `await using` keywords). All concurrent operations are automatically cleaned up when their scope completes.
+
+<Note>
+Requires Node.js 24+ or Bun 1.2+ with TypeScript 5.2+ for `using`/`await using` support.
+</Note>
+
+## Creating a Scope
+
+Every concurrent operation starts with a scope. Scopes automatically cancel all tasks and clean up resources when disposed.
+
+```typescript
+import { scope } from 'go-go-scope';
+
+// Basic scope with automatic cleanup
+await using s = scope();
+
+// Scope with timeout
+await using s = scope({ timeout: 5000 });
+
+// Scope with name for debugging
+await using s = scope({ name: 'api-request' });
+```
+
+<Tip>
+Always use `await using` (not `using`) for scopes, since cleanup is asynchronous.
+</Tip>
+
+## Running Tasks
+
+Tasks are the fundamental unit of concurrent work. They return a Result tuple `[error, value]` instead of throwing exceptions.
+
+### Basic Task Execution
+
+```typescript
+await using s = scope();
+
+const task = s.task(async ({ signal }) => {
+  const response = await fetch('https://api.example.com/data', { signal });
+  return response.json();
+});
+
+const [err, data] = await task;
+
+if (err) {
+  console.error('Request failed:', err);
+} else {
+  console.log('Data:', data);
+}
+```
+
+### Accessing Scope Services
+
+Tasks receive a context object with signal, logger, and services:
+
+```typescript
+await using s = scope({ name: 'api-service' });
+
+const [err, result] = await s.task(async ({ signal, logger, context }) => {
+  logger.info('Starting request');
+  
+  // Access context values
+  const userId = context.userId;
+  
+  const response = await fetch(`/api/users/${userId}`, { signal });
+  return response.json();
+});
+```
+
+## Timeouts
+
+Timeouts can be applied at the scope level or per-task.
+
+<CodeGroup>
+
+```typescript Scope Timeout
+// All tasks inherit the scope timeout
+await using s = scope({ timeout: 5000 });
+
+const [err, data] = await s.task(async ({ signal }) => {
+  return fetch('https://slow-api.com', { signal });
+});
+
+if (err) {
+  // Error: "Scope timeout after 5000ms"
+}
+```
+
+```typescript Task Timeout
+// Individual task timeout
+await using s = scope();
+
+const [err, data] = await s.task(
+  async ({ signal }) => fetch('https://slow-api.com', { signal }),
+  { timeout: 3000 }
+);
+
+if (err) {
+  // Error: "Task timeout after 3000ms"
+}
+```
+
+</CodeGroup>
+
+## Retry Logic
+
+Retry failed operations with configurable delay strategies.
+
+<Steps>
+
+<Step title="Simple Retry with Exponential Backoff">
+```typescript
+import { scope, exponentialBackoff } from 'go-go-scope';
+
+await using s = scope();
+
+const [err, data] = await s.task(
+  async ({ signal }) => {
+    const res = await fetch('https://api.example.com/data', { signal });
+    if (!res.ok) throw new Error('API error');
+    return res.json();
+  },
+  {
+    retry: {
+      maxRetries: 5,
+      delay: exponentialBackoff({ initial: 100, max: 5000, jitter: 0.3 }),
+      onRetry: (error, attempt) => {
+        console.log(`Retry attempt ${attempt}: ${error.message}`);
+      }
+    }
+  }
+);
+```
+</Step>
+
+<Step title="Conditional Retry">
+```typescript
+const [err, data] = await s.task(
+  async () => apiCall(),
+  {
+    retry: {
+      maxRetries: 3,
+      delay: 1000,
+      // Only retry on specific errors
+      retryCondition: (error) => {
+        return error instanceof NetworkError || error.status === 503;
+      }
+    }
+  }
+);
+```
+</Step>
+
+<Step title="Shorthand Retry Strategies">
+```typescript
+// Exponential backoff (default)
+const [err1, data1] = await s.task(() => apiCall(), { retry: 'exponential' });
+
+// Linear backoff
+const [err2, data2] = await s.task(() => apiCall(), { retry: 'linear' });
+
+// Fixed delay
+const [err3, data3] = await s.task(() => apiCall(), { retry: 'fixed' });
+```
+</Step>
+
+</Steps>
+
+## Error Handling
+
+### Result Tuples
+
+Tasks return `[error, value]` tuples instead of throwing:
+
+```typescript
+const [err, user] = await s.task(async () => fetchUser(id));
+
+if (err) {
+  // Handle error
+  console.error(err);
+  return;
+}
+
+// Use value (TypeScript knows err is undefined here)
+console.log(user.name);
+```
+
+### Custom Error Classes
+
+Wrap errors in custom classes for better type safety:
+
+```typescript
+class APIError extends Error {
+  constructor(message: string, public code: number) {
+    super(message);
+    this.name = 'APIError';
+  }
+}
+
+const [err, data] = await s.task(
+  async () => {
+    const res = await fetch('/api/data');
+    if (!res.ok) {
+      throw new APIError('Request failed', res.status);
+    }
+    return res.json();
+  },
+  { errorClass: APIError }
+);
+
+if (err) {
+  // err is typed as APIError
+  console.log(`API error: ${err.code}`);
+}
+```
+
+## Cancellation
+
+All tasks receive an AbortSignal for cooperative cancellation:
+
+```typescript
+await using s = scope({ timeout: 5000 });
+
+const task1 = s.task(async ({ signal }) => {
+  // Pass signal to fetch
+  const res = await fetch('https://api.example.com', { signal });
+  return res.json();
+});
+
+const task2 = s.task(async ({ signal }) => {
+  // Manual cancellation check
+  for (let i = 0; i < 1000; i++) {
+    if (signal.aborted) {
+      throw new Error('Cancelled');
+    }
+    await processItem(i);
+  }
+});
+
+// Both tasks are automatically cancelled after 5 seconds
+```
+
+<Warning>
+Always pass the signal to async operations like `fetch()` and check `signal.aborted` in loops.
+</Warning>
+
+## Dependency Injection
+
+Share services across tasks using dependency injection:
+
+```typescript
+interface Services {
+  db: Database;
+  cache: Cache;
+}
+
+await using s = scope()
+  .provide('db', new Database())
+  .provide('cache', new Cache());
+
+const [err, user] = await s.task(async ({ services }) => {
+  // Access injected services
+  const cached = await services.cache.get('user:1');
+  if (cached) return cached;
+  
+  const user = await services.db.query('SELECT * FROM users WHERE id = 1');
+  await services.cache.set('user:1', user);
+  return user;
+});
+```
+
+## Logging
+
+Built-in structured logging with automatic task context:
+
+```typescript
+await using s = scope({ name: 'api-handler', logLevel: 'info' });
+
+const [err, result] = await s.task(async ({ logger }) => {
+  logger.info('Processing request');
+  logger.debug('Detailed debug info');
+  logger.warn('Something unusual');
+  logger.error('An error occurred');
+  
+  return { status: 'ok' };
+});
+```
+
+## Common Patterns
+
+### Health Check with Timeout
+
+```typescript
+async function checkHealth(): Promise<boolean> {
+  await using s = scope({ timeout: 3000 });
+  
+  const [err] = await s.task(async ({ signal }) => {
+    await Promise.all([
+      fetch('https://api.example.com/health', { signal }),
+      fetch('https://db.example.com/health', { signal }),
+    ]);
+  });
+  
+  return err === undefined;
+}
+```
+
+### Retry with Backoff
+
+```typescript
+import { exponentialBackoff } from 'go-go-scope';
+
+await using s = scope();
+
+const [err, data] = await s.task(
+  async () => unreliableAPI(),
+  {
+    retry: {
+      maxRetries: 5,
+      delay: exponentialBackoff({ initial: 100, max: 30000 })
+    }
+  }
+);
+```
+
+### Request with Context
+
+```typescript
+await using s = scope({ 
+  context: { 
+    userId: '123', 
+    requestId: 'req-456' 
+  } 
+});
+
+const [err, result] = await s.task(async ({ context, logger }) => {
+  logger.info('Request started', { userId: context.userId });
+  return processRequest(context);
+});
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Channels" icon="comments" href="/guides/channels">
+    Learn about Go-style channels for producer-consumer patterns
+  </Card>
+  <Card title="Parallel Execution" icon="layer-group" href="/guides/parallel-execution">
+    Run multiple tasks concurrently with progress tracking
+  </Card>
+  <Card title="Resilience Patterns" icon="shield" href="/guides/resilience-patterns">
+    Circuit breakers, retries, and fault tolerance
+  </Card>
+  <Card title="Streams" icon="water" href="/guides/streams">
+    Lazy stream processing with 50+ operations
+  </Card>
+</CardGroup>

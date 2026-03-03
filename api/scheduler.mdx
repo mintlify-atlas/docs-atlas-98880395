@@ -1,0 +1,678 @@
+---
+title: '@go-go-scope/scheduler'
+description: 'Distributed job scheduler with cron support, Web UI, and multiple storage backends'
+---
+
+# @go-go-scope/scheduler
+
+Distributed job scheduler for go-go-scope with cron expression support, Web UI for management, and multiple storage backends for high availability deployments.
+
+## Installation
+
+```bash
+npm install @go-go-scope/scheduler
+```
+
+## Quick Start
+
+```typescript
+import { Scheduler } from '@go-go-scope/scheduler'
+import { scope } from 'go-go-scope'
+
+type AppSchedules = {
+  'send-email': { to: string; subject: string; body: string }
+  'daily-report': { date: string }
+}
+
+await using s = scope()
+
+const scheduler = new Scheduler<AppSchedules>({
+  scope: s,
+  enableWebUI: true,
+  webUIPort: 8080
+})
+
+// Create a schedule
+await scheduler.createSchedule('daily-report', {
+  cron: '0 9 * * *',
+  timezone: 'America/New_York'
+})
+
+// Register handler
+scheduler.onSchedule('daily-report', async (job, scope) => {
+  console.log('Generating report for:', job.payload.date)
+  // Generate report logic
+})
+
+scheduler.start()
+console.log('Web UI:', scheduler.getWebUIUrl())
+```
+
+## Architecture
+
+The scheduler uses a **mandatory Admin + Workers** pattern:
+
+- **Admin Instance**: Creates and manages schedules, serves Web UI
+- **Worker Instances**: Load schedules from storage and execute jobs
+- **Storage Layer**: Handles recurring scheduling automatically via `completeJobAndScheduleNext()`
+
+This design enables:
+- Multiple admin instances for HA (no leader election needed)
+- Multiple worker instances for distributed execution
+- Automatic job scheduling via database
+- Distributed locking prevents duplicate execution
+
+## Scheduler Class
+
+### Constructor
+
+```typescript
+const scheduler = new Scheduler<Schedules>(options)
+```
+
+<ParamField path="options" type="SchedulerOptions" required>
+  Scheduler configuration options
+</ParamField>
+
+#### SchedulerOptions
+
+<ParamField path="scope" type="Scope">
+  Parent scope for structured concurrency. If not provided, an internal scope is created.
+</ParamField>
+
+<ParamField path="storage" type="JobStorage">
+  Storage backend for jobs and schedules. Defaults to `InMemoryJobStorage`.
+</ParamField>
+
+<ParamField path="checkInterval" type="number">
+  Polling interval in milliseconds (default: 1000)
+</ParamField>
+
+<ParamField path="metrics" type="boolean">
+  Enable metrics collection (default: false)
+</ParamField>
+
+<ParamField path="enableWebUI" type="boolean">
+  Enable Web UI server (default: false)
+</ParamField>
+
+<ParamField path="webUIPort" type="number">
+  Web UI port (default: 8080)
+</ParamField>
+
+<ParamField path="webUIHost" type="string">
+  Web UI host (default: '0.0.0.0')
+</ParamField>
+
+<ParamField path="webUIPath" type="string">
+  Web UI base path (default: '/')
+</ParamField>
+
+<ParamField path="webUIApiKey" type="string">
+  Optional API key for Web UI authentication
+</ParamField>
+
+<ParamField path="autoStart" type="boolean">
+  Auto-start scheduler on creation (default: true)
+</ParamField>
+
+<ParamField path="deadlockThreshold" type="number">
+  Time in ms before job is considered deadlocked (optional)
+</ParamField>
+
+<ParamField path="enableLeaderElection" type="boolean">
+  Enable leader election for admin instances (default: false)
+</ParamField>
+
+<ParamField path="workerPool" type="{ size?: number; idleTimeout?: number }">
+  Worker pool configuration for CPU-intensive schedules
+</ParamField>
+
+## Methods
+
+### start()
+
+Start the scheduler polling loop.
+
+```typescript
+scheduler.start()
+```
+
+Workers will start checking for due jobs. Admin can create schedules after starting.
+
+### stop()
+
+Stop the scheduler and cancel all running jobs.
+
+```typescript
+await scheduler.stop()
+```
+
+### createSchedule()
+
+Create a new schedule (admin operation).
+
+```typescript
+await scheduler.createSchedule('schedule-name', {
+  cron: '0 * * * *',
+  timezone: 'America/New_York',
+  maxRetries: 3
+})
+```
+
+<ParamField path="name" type="string" required>
+  Unique schedule name
+</ParamField>
+
+<ParamField path="options" type="CreateScheduleOptions" required>
+  Schedule configuration
+</ParamField>
+
+#### CreateScheduleOptions
+
+<ParamField path="cron" type="string">
+  Cron expression (e.g., '0 9 * * *')
+</ParamField>
+
+<ParamField path="interval" type="number">
+  Interval in milliseconds (alternative to cron)
+</ParamField>
+
+<ParamField path="timezone" type="string">
+  IANA timezone (e.g., 'America/New_York')
+</ParamField>
+
+<ParamField path="endDate" type="Date">
+  End date - no new jobs after this date
+</ParamField>
+
+<ParamField path="defaultPayload" type="JobPayload">
+  Default payload for jobs
+</ParamField>
+
+<ParamField path="maxRetries" type="number">
+  Maximum retry attempts (default: 3)
+</ParamField>
+
+<ParamField path="retryDelay" type="number">
+  Delay between retries in ms (default: 1000)
+</ParamField>
+
+<ParamField path="timeout" type="number">
+  Job timeout in ms (default: 30000)
+</ParamField>
+
+<ParamField path="concurrent" type="boolean">
+  Allow concurrent execution (default: false)
+</ParamField>
+
+<ParamField path="jitter" type="number">
+  Random jitter in ms to prevent thundering herd (default: 0)
+</ParamField>
+
+### onSchedule()
+
+Register handler for a schedule (worker operation).
+
+```typescript
+scheduler.onSchedule('schedule-name', async (job, scope) => {
+  // Job handler logic
+  console.log('Processing:', job.payload)
+}, { worker: false })
+```
+
+<ParamField path="name" type="string" required>
+  Schedule name to handle
+</ParamField>
+
+<ParamField path="handler" type="ScheduleHandler" required>
+  Handler function for jobs
+</ParamField>
+
+<ParamField path="options" type="OnScheduleOptions">
+  Handler options
+</ParamField>
+
+#### ScheduleHandler
+
+```typescript
+type ScheduleHandler = (
+  job: Job,
+  scope: Scope
+) => Promise<void>
+```
+
+<ParamField path="job" type="Job" required>
+  Job to execute
+</ParamField>
+
+<ParamField path="scope" type="Scope" required>
+  Scope for the job execution
+</ParamField>
+
+### triggerSchedule()
+
+Manually trigger a schedule to create a job.
+
+```typescript
+await scheduler.triggerSchedule('send-email', {
+  to: 'user@example.com',
+  subject: 'Hello',
+  body: 'World'
+})
+```
+
+<ParamField path="name" type="string" required>
+  Schedule name
+</ParamField>
+
+<ParamField path="payload" type="Payload" required>
+  Job payload (typed based on schedule definition)
+</ParamField>
+
+<ParamField path="options" type="TriggerOptions">
+  Trigger options
+</ParamField>
+
+<ResponseField name="ScheduleJobResult" type="ScheduleJobResult">
+  Result containing job ID and run time
+</ResponseField>
+
+### updateSchedule()
+
+Update an existing schedule.
+
+```typescript
+await scheduler.updateSchedule('schedule-name', {
+  cron: '0 10 * * *',
+  maxRetries: 5
+})
+```
+
+<ParamField path="name" type="string" required>
+  Schedule name
+</ParamField>
+
+<ParamField path="options" type="UpdateScheduleOptions" required>
+  Options to update
+</ParamField>
+
+### deleteSchedule()
+
+Delete a schedule and its pending jobs.
+
+```typescript
+await scheduler.deleteSchedule('schedule-name')
+```
+
+### pauseSchedule()
+
+Pause a schedule (no new jobs created).
+
+```typescript
+await scheduler.pauseSchedule('schedule-name')
+```
+
+### resumeSchedule()
+
+Resume a paused schedule.
+
+```typescript
+await scheduler.resumeSchedule('schedule-name')
+```
+
+### getScheduleStats()
+
+Get statistics for a schedule.
+
+```typescript
+const stats = await scheduler.getScheduleStats('schedule-name')
+console.log('Success rate:', stats.successRate)
+```
+
+<ResponseField name="ScheduleStats" type="ScheduleStats">
+  Statistics including success rate, job counts, and timing info
+</ResponseField>
+
+### getWebUIUrl()
+
+Get the Web UI URL if enabled.
+
+```typescript
+const url = scheduler.getWebUIUrl()
+console.log('Web UI:', url) // http://localhost:8080/
+```
+
+<ResponseField name="string | null" type="string | null">
+  Web UI URL or null if not enabled
+</ResponseField>
+
+## Events
+
+### on()
+
+Subscribe to scheduler events.
+
+```typescript
+const unsubscribe = scheduler.on('jobCompleted', ({ job }) => {
+  console.log('Job completed:', job.id)
+})
+
+// Later: unsubscribe()
+```
+
+#### Available Events
+
+<ParamField path="started" type="{ instanceId: string }">
+  Scheduler started
+</ParamField>
+
+<ParamField path="stopped" type="{ instanceId: string }">
+  Scheduler stopped
+</ParamField>
+
+<ParamField path="jobStarted" type="{ job: Job }">
+  Job execution started
+</ParamField>
+
+<ParamField path="jobCompleted" type="{ job: Job }">
+  Job completed successfully
+</ParamField>
+
+<ParamField path="jobFailed" type="{ job: Job; error: Error }">
+  Job failed
+</ParamField>
+
+<ParamField path="jobRetrying" type="{ job: Job; attempt: number }">
+  Job is retrying
+</ParamField>
+
+<ParamField path="becameLeader" type="{ instanceId: string }">
+  Instance became leader (HA mode)
+</ParamField>
+
+## Storage Backends
+
+### InMemoryJobStorage
+
+Simple in-memory storage for single-node deployments.
+
+```typescript
+import { InMemoryJobStorage } from '@go-go-scope/scheduler'
+
+const scheduler = new Scheduler({
+  storage: new InMemoryJobStorage()
+})
+```
+
+### RedisJobStorage
+
+Redis-backed storage for distributed deployments.
+
+```typescript
+import { RedisJobStorage } from '@go-go-scope/scheduler'
+import { RedisAdapter } from '@go-go-scope/persistence-redis'
+import Redis from 'ioredis'
+
+const redis = new Redis()
+const adapter = new RedisAdapter(redis)
+const storage = new RedisJobStorage(redis, adapter)
+
+const scheduler = new Scheduler({ storage })
+```
+
+### SQLJobStorage
+
+SQL database storage (PostgreSQL, MySQL, SQLite).
+
+```typescript
+import { SQLJobStorage } from '@go-go-scope/scheduler'
+import { PostgresAdapter } from '@go-go-scope/persistence-postgres'
+import pg from 'pg'
+
+const pool = new pg.Pool({ connectionString: 'postgresql://...' })
+const adapter = new PostgresAdapter(pool)
+const storage = new SQLJobStorage(adapter)
+
+const scheduler = new Scheduler({ storage })
+```
+
+## Cron Support
+
+### parseCron()
+
+Parse a cron expression.
+
+```typescript
+import { parseCron } from '@go-go-scope/scheduler'
+
+const cron = parseCron('0 9 * * *', 'America/New_York')
+const next = cron.next() // Next occurrence
+```
+
+<ParamField path="expression" type="string" required>
+  Cron expression
+</ParamField>
+
+<ParamField path="timezone" type="string">
+  IANA timezone
+</ParamField>
+
+<ResponseField name="CronExpression" type="CronExpression">
+  Parsed cron expression with `.next()` method
+</ResponseField>
+
+### CronPresets
+
+Common cron presets.
+
+```typescript
+import { CronPresets } from '@go-go-scope/scheduler'
+
+await scheduler.createSchedule('hourly-task', {
+  cron: CronPresets.HOURLY // '0 * * * *'
+})
+```
+
+Available presets:
+- `EVERY_MINUTE`: `'* * * * *'`
+- `HOURLY`: `'0 * * * *'`
+- `DAILY`: `'0 0 * * *'`
+- `WEEKLY`: `'0 0 * * 0'`
+- `MONTHLY`: `'0 0 1 * *'`
+- `YEARLY`: `'0 0 1 1 *'`
+
+### describeCron()
+
+Get human-readable description of cron expression.
+
+```typescript
+import { describeCron } from '@go-go-scope/scheduler'
+
+const description = describeCron('0 9 * * 1-5')
+// "At 9:00 AM, Monday through Friday"
+```
+
+## Type Safety
+
+Define schedule types for autocomplete and type checking:
+
+```typescript
+type AppSchedules = {
+  'send-email': {
+    to: string
+    subject: string
+    body: string
+  }
+  'process-payment': {
+    amount: number
+    currency: string
+  }
+  'cleanup-temp-files': {
+    maxAge: number
+  }
+}
+
+const scheduler = new Scheduler<AppSchedules>({ storage })
+
+// Autocomplete for schedule names!
+scheduler.onSchedule('send-email', async (job) => {
+  // job.payload is fully typed
+  const { to, subject, body } = job.payload
+  await sendEmail({ to, subject, body })
+})
+
+// Type checking works!
+await scheduler.triggerSchedule('send-email', {
+  to: 'user@example.com',
+  subject: 'Hello',
+  body: 'World'
+})
+```
+
+## Job Object
+
+<ParamField path="id" type="string">
+  Unique job ID
+</ParamField>
+
+<ParamField path="scheduleId" type="string">
+  Reference to parent schedule
+</ParamField>
+
+<ParamField path="scheduleName" type="string">
+  Schedule name
+</ParamField>
+
+<ParamField path="payload" type="JobPayload">
+  Job data
+</ParamField>
+
+<ParamField path="status" type="JobStatus">
+  Current status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+</ParamField>
+
+<ParamField path="priority" type="number">
+  Priority (higher = runs first)
+</ParamField>
+
+<ParamField path="createdAt" type="Date">
+  Creation timestamp
+</ParamField>
+
+<ParamField path="runAt" type="Date">
+  Scheduled run time
+</ParamField>
+
+<ParamField path="lastExecutedAt" type="Date">
+  Last execution timestamp
+</ParamField>
+
+<ParamField path="completedAt" type="Date">
+  Completion timestamp
+</ParamField>
+
+<ParamField path="retryCount" type="number">
+  Current retry count
+</ParamField>
+
+<ParamField path="maxRetries" type="number">
+  Maximum retry attempts
+</ParamField>
+
+<ParamField path="error" type="string">
+  Error message if failed
+</ParamField>
+
+## Examples
+
+### Email Scheduler
+
+```typescript
+type EmailSchedules = {
+  'welcome-email': { userId: string }
+  'daily-digest': { emails: string[] }
+}
+
+const scheduler = new Scheduler<EmailSchedules>({
+  storage: new RedisJobStorage(redis, redisAdapter)
+})
+
+// Daily digest at 8 AM
+await scheduler.createSchedule('daily-digest', {
+  cron: '0 8 * * *',
+  timezone: 'America/New_York'
+})
+
+scheduler.onSchedule('daily-digest', async (job) => {
+  const { emails } = job.payload
+  for (const email of emails) {
+    await sendDigest(email)
+  }
+})
+```
+
+### Retry with Backoff
+
+```typescript
+await scheduler.createSchedule('api-sync', {
+  interval: 60000, // 1 minute
+  maxRetries: 5,
+  retryDelay: 5000, // 5 seconds
+  timeout: 30000 // 30 second timeout
+})
+
+scheduler.onSchedule('api-sync', async (job, scope) => {
+  const response = await fetch('https://api.example.com/data', {
+    signal: scope.signal
+  })
+  const data = await response.json()
+  await saveToDatabase(data)
+})
+```
+
+### Multi-Instance HA Setup
+
+```typescript
+// Admin instance (creates schedules, serves Web UI)
+const admin = new Scheduler({
+  storage: sqlStorage,
+  enableWebUI: true,
+  webUIPort: 8080,
+  enableLeaderElection: true
+})
+
+await admin.createSchedule('backup', {
+  cron: '0 2 * * *',
+  timezone: 'UTC'
+})
+
+// Worker instance 1
+const worker1 = new Scheduler({ storage: sqlStorage })
+worker1.onSchedule('backup', async (job) => {
+  await performBackup()
+})
+
+// Worker instance 2
+const worker2 = new Scheduler({ storage: sqlStorage })
+worker2.onSchedule('backup', async (job) => {
+  await performBackup()
+})
+
+// Only one worker will execute each job (distributed locking)
+```
+
+### CPU-Intensive Schedules
+
+```typescript
+const scheduler = new Scheduler({
+  storage,
+  workerPool: { size: 4, idleTimeout: 30000 }
+})
+
+scheduler.onSchedule('heavy-computation', async (job) => {
+  // Runs in worker thread
+  const result = heavyCalculation(job.payload.data)
+  await saveResult(result)
+}, { worker: true })
+```

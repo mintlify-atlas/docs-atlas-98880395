@@ -1,0 +1,352 @@
+---
+title: Installation
+description: Install go-go-scope and its ecosystem packages for TypeScript structured concurrency
+---
+
+# Installation
+
+go-go-scope requires **Node.js 24+** or **Bun 1.2+** and **TypeScript 5.2+** for Explicit Resource Management support.
+
+## Core Library
+
+Install the main package using your preferred package manager:
+
+<CodeGroup>
+
+```bash npm
+npm install go-go-scope
+```
+
+```bash pnpm
+pnpm add go-go-scope
+```
+
+```bash yarn
+yarn add go-go-scope
+```
+
+```bash bun
+bun add go-go-scope
+```
+
+</CodeGroup>
+
+## TypeScript Configuration
+
+go-go-scope uses the `using` and `await using` syntax from the Explicit Resource Management proposal. Configure your `tsconfig.json`:
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "ESNext.Disposable"],
+    "strict": true
+  }
+}
+```
+
+<Note>
+The `ESNext.Disposable` lib is required for `Symbol.dispose` and `Symbol.asyncDispose` types.
+</Note>
+
+## Package.json Configuration
+
+Ensure your package uses ESM modules:
+
+```json package.json
+{
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
+```
+
+## Additional Packages
+
+### Job Scheduler
+
+For distributed job scheduling with cron support:
+
+<CodeGroup>
+
+```bash npm
+npm install @go-go-scope/scheduler
+```
+
+```bash pnpm
+pnpm add @go-go-scope/scheduler
+```
+
+```bash yarn
+yarn add @go-go-scope/scheduler
+```
+
+```bash bun
+bun add @go-go-scope/scheduler
+```
+
+</CodeGroup>
+
+### Stream Processing
+
+For lazy async stream operations:
+
+<CodeGroup>
+
+```bash npm
+npm install @go-go-scope/stream
+```
+
+```bash pnpm
+pnpm add @go-go-scope/stream
+```
+
+```bash yarn
+yarn add @go-go-scope/stream
+```
+
+```bash bun
+bun add @go-go-scope/stream
+```
+
+</CodeGroup>
+
+### Testing Utilities
+
+For mock scopes and test helpers:
+
+<CodeGroup>
+
+```bash npm
+npm install --save-dev @go-go-scope/testing
+```
+
+```bash pnpm
+pnpm add -D @go-go-scope/testing
+```
+
+```bash yarn
+yarn add --dev @go-go-scope/testing
+```
+
+```bash bun
+bun add -d @go-go-scope/testing
+```
+
+</CodeGroup>
+
+## Framework Adapters
+
+Integrate go-go-scope with your favorite Node.js framework:
+
+### Fastify
+
+```bash
+npm install @go-go-scope/adapter-fastify
+```
+
+### Express
+
+```bash
+npm install @go-go-scope/adapter-express
+```
+
+### NestJS
+
+```bash
+npm install @go-go-scope/adapter-nestjs
+```
+
+### Hono
+
+```bash
+npm install @go-go-scope/adapter-hono
+```
+
+### Other Frameworks
+
+<CardGroup cols={2}>
+  <Card title="Koa">
+    ```bash
+    npm install @go-go-scope/adapter-koa
+    ```
+  </Card>
+  
+  <Card title="Hapi">
+    ```bash
+    npm install @go-go-scope/adapter-hapi
+    ```
+  </Card>
+  
+  <Card title="Elysia">
+    ```bash
+    npm install @go-go-scope/adapter-elysia
+    ```
+  </Card>
+  
+  <Card title="Next.js">
+    ```bash
+    npm install @go-go-scope/adapter-nextjs
+    ```
+  </Card>
+</CardGroup>
+
+## Persistence Adapters
+
+Add distributed locks and circuit breaker persistence:
+
+### Redis
+
+```bash
+npm install @go-go-scope/persistence-redis ioredis
+```
+
+### PostgreSQL
+
+```bash
+npm install @go-go-scope/persistence-postgres pg
+```
+
+### MySQL
+
+```bash
+npm install @go-go-scope/persistence-mysql mysql2
+```
+
+### MongoDB
+
+```bash
+npm install @go-go-scope/persistence-mongodb mongodb
+```
+
+### DynamoDB
+
+```bash
+npm install @go-go-scope/persistence-dynamodb @aws-sdk/client-dynamodb
+```
+
+### SQLite
+
+For Node.js:
+
+```bash
+npm install @go-go-scope/persistence-sqlite sqlite3
+```
+
+For Bun (uses native SQLite):
+
+```bash
+bun add @go-go-scope/persistence-sqlite-bun
+```
+
+## Observability Plugins
+
+### OpenTelemetry
+
+Distributed tracing for all scope operations:
+
+```bash
+npm install @go-go-scope/plugin-opentelemetry @opentelemetry/api
+```
+
+### Metrics Collection
+
+Prometheus and JSON metrics export:
+
+```bash
+npm install @go-go-scope/plugin-metrics
+```
+
+### Performance Profiling
+
+Task performance analysis:
+
+```bash
+npm install @go-go-scope/plugin-profiler
+```
+
+### Deadlock Detection
+
+Automatic detection of blocking cycles:
+
+```bash
+npm install @go-go-scope/plugin-deadlock-detector
+```
+
+## Verify Installation
+
+Create a simple test file to verify everything works:
+
+```typescript test.ts
+import { scope } from "go-go-scope";
+
+await using s = scope();
+
+const [err, result] = await s.task(async () => {
+  return "Hello, go-go-scope!";
+});
+
+if (err) {
+  console.error("Error:", err);
+} else {
+  console.log("Result:", result);
+}
+```
+
+Run the test:
+
+```bash
+node test.ts
+# or with tsx for TypeScript
+npx tsx test.ts
+```
+
+<Tip>
+Use [tsx](https://github.com/privatenumber/tsx) for running TypeScript directly during development:
+```bash
+npm install --save-dev tsx
+```
+</Tip>
+
+## Runtime Requirements
+
+### Node.js
+
+- **Minimum version**: 24.0.0
+- **Required features**: Native `fetch`, `AbortSignal.timeout()`, `using` syntax support
+- **Recommended**: Latest LTS version
+
+### Bun
+
+- **Minimum version**: 1.2.0
+- **Native features**: Built-in SQLite support, faster startup
+- **Compatibility**: Fully tested and supported
+
+### Deno
+
+<Warning>
+Deno support is experimental. Some features may require polyfills or configuration changes.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/getting-started/quickstart">
+    Build your first concurrent application
+  </Card>
+  
+  <Card title="Core Concepts" icon="book" href="/concepts/structured-concurrency">
+    Understand structured concurrency principles
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/scope">
+    Explore the complete API
+  </Card>
+  
+  <Card title="Examples" icon="lightbulb" href="/examples">
+    See real-world usage patterns
+  </Card>
+</CardGroup>

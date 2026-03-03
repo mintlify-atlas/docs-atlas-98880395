@@ -1,0 +1,393 @@
+---
+title: "Rate Limiting"
+description: "Implement debounce, throttle, and token bucket patterns for controlling operation frequency and preventing overload"
+---
+
+# Rate Limiting Patterns
+
+Control the rate of operations using debounce, throttle, and token bucket algorithms. Essential for API rate limiting, UI event handling, and resource protection.
+
+## Debounce Pattern
+
+Delay execution until a quiet period after rapid events:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+async function searchWithDebounce() {
+  await using s = scope();
+
+  // Debounce search - only execute after 300ms of no input
+  const search = s.debounce(
+    async (query: string) => {
+      const results = await fetch(`/api/search?q=${query}`);
+      return results.json();
+    },
+    { wait: 300 }
+  );
+
+  // Rapid calls - only the last one executes
+  search('h');     // Cancelled
+  search('he');    // Cancelled
+  search('hel');   // Cancelled
+  search('hello'); // Executes after 300ms
+
+  const [err, results] = await search('hello world');
+  if (err) {
+    console.error('Search failed:', err);
+    return;
+  }
+
+  console.log('Results:', results);
+}
+```
+
+## Throttle Pattern
+
+Limit execution frequency to at most once per interval:
+
+<Steps>
+  <Step title="Basic throttle">
+    Execute at most once per time window:
+
+    ```typescript
+    await using s = scope();
+
+    // Throttle API calls - max once per second
+    const saveData = s.throttle(
+      async (data: Record<string, unknown>) => {
+        await fetch('/api/save', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        });
+      },
+      { interval: 1000, leading: true }
+    );
+
+    // Rapid calls
+    await saveData({ value: 1 }); // Executes immediately
+    await saveData({ value: 2 }); // Throttled
+    await saveData({ value: 3 }); // Throttled
+
+    // Wait 1 second
+    await new Promise(r => setTimeout(r, 1000));
+
+    await saveData({ value: 4 }); // Executes
+    ```
+  </Step>
+
+  <Step title="Trailing edge throttle">
+    Execute the last call after the interval:
+
+    ```typescript
+    await using s = scope();
+
+    const updateUI = s.throttle(
+      async (state: unknown) => {
+        // Update expensive UI
+        await renderComplexView(state);
+      },
+      { 
+        interval: 100,
+        leading: false,   // Don't execute immediately
+        trailing: true    // Execute last call after interval
+      }
+    );
+
+    // Rapid state updates
+    for (let i = 0; i < 100; i++) {
+      await updateUI({ count: i });
+    }
+    // Only renders final state after 100ms
+    ```
+  </Step>
+
+  <Step title="Both edges throttle">
+    Execute on both leading and trailing edges:
+
+    ```typescript
+    await using s = scope();
+
+    const trackScroll = s.throttle(
+      async (position: number) => {
+        await analytics.track('scroll', { position });
+      },
+      { 
+        interval: 500,
+        leading: true,   // Track first scroll immediately
+        trailing: true   // Track final position after scrolling stops
+      }
+    );
+
+    window.addEventListener('scroll', () => {
+      trackScroll(window.scrollY);
+    });
+    ```
+  </Step>
+</Steps>
+
+## Token Bucket Pattern
+
+Allow bursts while maintaining average rate:
+
+<CodeGroup>
+```typescript Basic Token Bucket
+import { scope, TokenBucket } from 'go-go-scope';
+
+async function rateLimitedAPI() {
+  await using s = scope();
+
+  // Allow 100 requests/second with burst capacity of 100
+  const bucket = s.tokenBucket({
+    capacity: 100,
+    refillRate: 100  // tokens per second
+  });
+
+  async function makeRequest(data: unknown) {
+    // Wait for token to be available
+    return bucket.acquire(1, async () => {
+      return fetch('/api/endpoint', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    });
+  }
+
+  // Make many requests - automatically rate limited
+  const requests = Array.from({ length: 1000 }, (_, i) => 
+    makeRequest({ id: i })
+  );
+
+  const results = await Promise.all(requests);
+  console.log('Completed:', results.length);
+}
+```
+
+```typescript With Timeout
+import { scope, TokenBucket } from 'go-go-scope';
+
+async function rateLimitWithTimeout() {
+  await using s = scope();
+
+  const bucket = s.tokenBucket({
+    capacity: 10,
+    refillRate: 2  // 2 tokens per second
+  });
+
+  async function tryRequest(data: unknown) {
+    // Try to acquire with 5 second timeout
+    const result = await bucket.acquireWithTimeout(
+      1,
+      5000,
+      async () => {
+        return fetch('/api/endpoint', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        });
+      }
+    );
+
+    if (!result) {
+      throw new Error('Rate limit timeout - try again later');
+    }
+
+    return result;
+  }
+
+  const [err, response] = await s.task(() => tryRequest({ data: 'test' }));
+  if (err) {
+    console.error('Request failed:', err);
+  }
+}
+```
+
+```typescript Distributed Rate Limiting
+import { scope, TokenBucket } from 'go-go-scope';
+import { RedisAdapter } from '@go-go-scope/persistence-redis';
+
+async function distributedRateLimit() {
+  await using s = scope();
+
+  const redis = new RedisAdapter({
+    host: 'localhost',
+    port: 6379,
+  });
+
+  // Shared rate limit across multiple servers
+  const bucket = s.tokenBucket({
+    capacity: 1000,
+    refillRate: 100,
+    cache: redis,
+    key: 'api-rate-limit',
+  });
+
+  async function handleRequest(userId: string, data: unknown) {
+    // Per-user rate limiting
+    const userBucket = s.tokenBucket({
+      capacity: 10,
+      refillRate: 1,
+      cache: redis,
+      key: `user-rate-limit:${userId}`,
+    });
+
+    // Check both global and user limits
+    const allowed = await bucket.tryConsume(1);
+    if (!allowed) {
+      throw new Error('Global rate limit exceeded');
+    }
+
+    const userAllowed = await userBucket.tryConsume(1);
+    if (!userAllowed) {
+      throw new Error('User rate limit exceeded');
+    }
+
+    // Process request
+    return processRequest(data);
+  }
+}
+```
+</CodeGroup>
+
+## Semaphore Rate Limiting
+
+Limit concurrent operations:
+
+```typescript
+import { scope, Semaphore } from 'go-go-scope';
+
+async function concurrencyLimit() {
+  await using s = scope();
+
+  // Allow max 5 concurrent operations
+  const sem = new Semaphore(5);
+
+  async function processItem(item: unknown) {
+    return sem.acquire(async () => {
+      // CPU/IO intensive work
+      return await heavyProcessing(item);
+    });
+  }
+
+  // Process 100 items with max 5 concurrent
+  const items = Array.from({ length: 100 }, (_, i) => ({ id: i }));
+  
+  const results = await Promise.all(
+    items.map(item => processItem(item))
+  );
+
+  console.log('Processed:', results.length);
+}
+```
+
+## Adaptive Rate Limiting
+
+Dynamically adjust rate based on system load:
+
+```typescript
+import { scope, TokenBucket } from 'go-go-scope';
+
+class AdaptiveRateLimiter {
+  private bucket: TokenBucket;
+  private baseRate = 100;
+  private currentRate = 100;
+
+  constructor(scope: Scope) {
+    this.bucket = scope.tokenBucket({
+      capacity: this.baseRate,
+      refillRate: this.baseRate,
+    });
+
+    // Monitor system metrics
+    scope.task(async ({ signal }) => {
+      while (!signal.aborted) {
+        await this.adjustRate();
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    });
+  }
+
+  private async adjustRate() {
+    const metrics = await getSystemMetrics();
+
+    if (metrics.errorRate > 0.1) {
+      // High error rate - reduce by 50%
+      this.currentRate = Math.max(10, this.currentRate * 0.5);
+    } else if (metrics.cpuUsage < 0.5 && metrics.errorRate < 0.01) {
+      // System healthy - increase by 20%
+      this.currentRate = Math.min(this.baseRate, this.currentRate * 1.2);
+    }
+
+    console.log('Rate adjusted to:', this.currentRate);
+    await this.bucket.reset();
+  }
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    return this.bucket.acquire(1, fn);
+  }
+}
+
+// Usage
+await using s = scope();
+const limiter = new AdaptiveRateLimiter(s);
+
+for (let i = 0; i < 1000; i++) {
+  await limiter.execute(() => makeAPICall(i));
+}
+```
+
+## Combining Strategies
+
+Use multiple rate limiting techniques together:
+
+```typescript
+import { scope } from 'go-go-scope';
+
+async function hybridRateLimiting() {
+  await using s = scope();
+
+  // Token bucket for overall rate
+  const bucket = s.tokenBucket({
+    capacity: 100,
+    refillRate: 10,
+  });
+
+  // Semaphore for concurrency
+  const sem = new Semaphore(5);
+
+  // Debounce for rapid repeated calls
+  const debouncedProcess = s.debounce(
+    async (items: unknown[]) => {
+      return sem.acquire(async () => {
+        return bucket.acquire(items.length, async () => {
+          // Process batch
+          return processBatch(items);
+        });
+      });
+    },
+    { wait: 100 }
+  );
+
+  // Collects items and processes in debounced batches
+  return debouncedProcess;
+}
+```
+
+## Best Practices
+
+- **Choose the right pattern**:
+  - Debounce: Search input, autosave, window resize
+  - Throttle: Scroll events, mouse movement, analytics
+  - Token bucket: API rate limiting, request quotas
+  - Semaphore: Concurrent connection limits
+
+- **Set appropriate limits**: Based on actual capacity, not arbitrary numbers
+- **Handle rejections**: Provide feedback when rate limited
+- **Monitor metrics**: Track rate limit hits and adjust accordingly
+- **Graceful degradation**: Reduce functionality under load instead of failing
+- **Distributed systems**: Use persistence adapters for shared state
+
+## Related Patterns
+
+- [Retry Strategies](/examples/retry-strategies) - Handle rate limit errors
+- [Health Checks](/examples/health-checks) - Monitor rate limiter effectiveness
+- [Pipeline Processing](/examples/pipeline-processing) - Apply backpressure

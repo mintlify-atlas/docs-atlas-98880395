@@ -1,0 +1,470 @@
+---
+title: Koa Adapter
+description: Request-scoped structured concurrency for Koa applications
+---
+
+The Koa adapter provides middleware-based integration of go-go-scope with Koa's async/await-first architecture.
+
+## Installation
+
+```bash
+npm install @go-go-scope/adapter-koa go-go-scope koa
+```
+
+## Quick Start
+
+```typescript
+import Koa from 'koa'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+
+const app = new Koa()
+
+// Apply middleware
+app.use(koaGoGoScope({
+  name: 'koa-api',
+  timeout: 30000 // Optional: default timeout for all requests
+}))
+
+app.use(async (ctx) => {
+  const scope = ctx.state.scope
+  
+  const [err, user] = await scope.task(
+    () => fetchUser(ctx.params.id),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) {
+    ctx.status = 500
+    ctx.body = { error: err.message }
+    return
+  }
+  ctx.body = user
+})
+
+const server = app.listen(3000)
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await closeKoaScope()
+  server.close()
+})
+```
+
+## Configuration Options
+
+<ParamField path="name" type="string" default="'koa-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+<ParamField path="onError" type="(error: Error, ctx: Context) => void" optional>
+  Custom error handler for scope disposal errors
+</ParamField>
+
+## Middleware Architecture
+
+<Steps>
+  <Step title="Root Scope Creation">
+    A singleton root scope is created on first middleware invocation
+  </Step>
+  
+  <Step title="State Injection">
+    Request scope is stored in `ctx.state.scope` and root in `ctx.state.rootScope`
+  </Step>
+  
+  <Step title="Request Processing">
+    Each request gets a unique child scope from the root
+  </Step>
+  
+  <Step title="Cleanup in Finally">
+    Request scopes are disposed in a `finally` block after middleware chain completes
+  </Step>
+</Steps>
+
+## Helper Functions
+
+### getScope(ctx)
+
+Retrieves the request-scoped scope from the Koa context:
+
+```typescript
+import { getScope } from '@go-go-scope/adapter-koa'
+
+app.use(async (ctx) => {
+  const scope = getScope(ctx)
+  const [err, data] = await scope.task(() => fetchData())
+  ctx.body = data
+})
+```
+
+### getRootScope(ctx)
+
+Retrieves the root application scope:
+
+```typescript
+import { getRootScope } from '@go-go-scope/adapter-koa'
+
+app.use(async (ctx) => {
+  const rootScope = getRootScope(ctx)
+  // Access application-level scope
+  ctx.body = { status: 'ok' }
+})
+```
+
+### closeKoaScope()
+
+Gracefully disposes the root scope:
+
+```typescript
+import { closeKoaScope } from '@go-go-scope/adapter-koa'
+
+process.on('SIGTERM', async () => {
+  await closeKoaScope()
+  server.close()
+})
+```
+
+## Usage Examples
+
+### REST API with Router
+
+<CodeGroup>
+```typescript GET
+import Koa from 'koa'
+import Router from '@koa/router'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+
+const app = new Koa()
+const router = new Router()
+
+app.use(koaGoGoScope())
+
+router.get('/posts/:id', async (ctx) => {
+  const scope = ctx.state.scope
+  const [err, post] = await scope.task(
+    () => db.posts.findById(ctx.params.id)
+  )
+
+  if (err) {
+    ctx.status = 404
+    ctx.body = { error: 'Post not found' }
+    return
+  }
+  ctx.body = post
+})
+
+app.use(router.routes())
+app.listen(3000)
+```
+
+```typescript POST
+router.post('/posts', async (ctx) => {
+  const scope = ctx.state.scope
+  
+  const [err, post] = await scope.task(
+    () => db.posts.create(ctx.request.body),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) {
+    ctx.status = 500
+    ctx.body = { error: err.message }
+    return
+  }
+  
+  ctx.status = 201
+  ctx.body = post
+})
+```
+
+```typescript DELETE
+router.delete('/posts/:id', async (ctx) => {
+  const scope = ctx.state.scope
+  
+  const [err] = await scope.task(
+    () => db.posts.delete(ctx.params.id)
+  )
+
+  if (err) {
+    ctx.status = 500
+    ctx.body = { error: err.message }
+    return
+  }
+  
+  ctx.status = 204
+})
+```
+</CodeGroup>
+
+### Parallel Data Fetching
+
+```typescript
+import Koa from 'koa'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+
+const app = new Koa()
+app.use(koaGoGoScope())
+
+app.use(async (ctx) => {
+  if (ctx.path !== '/dashboard') return
+  
+  const scope = ctx.state.scope
+  const userId = ctx.query.userId
+
+  const [err, results] = await scope.parallel([
+    () => fetchProfile(userId),
+    () => fetchPosts(userId),
+    () => fetchFollowers(userId)
+  ])
+
+  if (err) {
+    ctx.status = 500
+    ctx.body = { error: 'Failed to load dashboard' }
+    return
+  }
+
+  ctx.body = {
+    profile: results[0],
+    posts: results[1],
+    followers: results[2]
+  }
+})
+```
+
+### Custom Error Handler
+
+```typescript
+import Koa from 'koa'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+
+const app = new Koa()
+
+app.use(koaGoGoScope({
+  name: 'error-aware-api',
+  onError: (error, ctx) => {
+    console.error('Scope error:', error.message, 'Path:', ctx.path)
+    // Could send to error tracking service
+  }
+}))
+
+app.use(async (ctx) => {
+  const scope = ctx.state.scope
+  const [err, data] = await scope.task(
+    () => fetchData(),
+    { timeout: 5000 }
+  )
+
+  if (err) {
+    ctx.status = 500
+    ctx.body = { error: err.message }
+    return
+  }
+  
+  ctx.body = data
+})
+```
+
+### Streaming Response
+
+```typescript
+import Koa from 'koa'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+import { PassThrough } from 'stream'
+
+const app = new Koa()
+app.use(koaGoGoScope())
+
+app.use(async (ctx) => {
+  if (ctx.path !== '/stream-logs') return
+  
+  const scope = ctx.state.scope
+  const channel = scope.channel({ buffer: 100 })
+
+  // Producer
+  scope.task(async ({ signal }) => {
+    for (let i = 0; i < 100; i++) {
+      if (signal.aborted) break
+      await channel.send(`Log line ${i}\n`)
+      await new Promise(r => setTimeout(r, 100))
+    }
+    channel.close()
+  })
+
+  // Stream to response
+  ctx.type = 'text/plain'
+  const stream = new PassThrough()
+  ctx.body = stream
+
+  for await (const line of channel) {
+    stream.write(line)
+  }
+  stream.end()
+})
+```
+
+### Middleware Composition
+
+```typescript
+import Koa from 'koa'
+import bodyParser from 'koa-bodyparser'
+import cors from '@koa/cors'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+
+const app = new Koa()
+
+// Apply middleware in order
+app.use(cors())
+app.use(bodyParser())
+app.use(koaGoGoScope({ name: 'api' }))
+
+app.use(async (ctx) => {
+  // Scope is available after koaGoGoScope middleware
+  const scope = ctx.state.scope
+  const [err, data] = await scope.task(() => fetchData())
+  
+  ctx.body = data
+})
+```
+
+### Circuit Breaker
+
+```typescript
+import Koa from 'koa'
+import { koaGoGoScope } from '@go-go-scope/adapter-koa'
+import { CircuitBreaker } from 'go-go-scope'
+
+const breaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000
+})
+
+const app = new Koa()
+app.use(koaGoGoScope())
+
+app.use(async (ctx) => {
+  if (ctx.path !== '/external') return
+  
+  const scope = ctx.state.scope
+  
+  const [err, response] = await scope.task(async ({ signal }) => {
+    return breaker.execute(() =>
+      fetch('https://external-api.com/data', { signal })
+    )
+  })
+
+  if (err) {
+    if (breaker.state === 'open') {
+      ctx.status = 503
+      ctx.body = { error: 'Service unavailable' }
+      return
+    }
+    ctx.status = 500
+    ctx.body = { error: err.message }
+    return
+  }
+
+  ctx.body = await response.json()
+})
+```
+
+## Type Augmentation
+
+The adapter augments Koa's `DefaultState` interface:
+
+```typescript
+declare module 'koa' {
+  interface DefaultState {
+    scope: Scope<Record<string, unknown>>
+    rootScope: Scope<Record<string, unknown>>
+  }
+}
+```
+
+This provides full type safety:
+
+```typescript
+app.use(async (ctx) => {
+  // TypeScript knows ctx.state.scope is Scope
+  const scope = ctx.state.scope
+  const [err, data] = await scope.task(() => fetchData())
+  ctx.body = data
+})
+```
+
+## Error Handling
+
+The middleware handles errors during scope disposal:
+
+```typescript
+finally {
+  await requestScope[Symbol.asyncDispose]().catch((err) => {
+    if (onError) {
+      onError(err as Error, ctx)
+    }
+  })
+}
+```
+
+## Graceful Shutdown
+
+```typescript
+import { closeKoaScope } from '@go-go-scope/adapter-koa'
+
+const server = app.listen(3000)
+
+const shutdown = async () => {
+  console.log('Shutting down gracefully...')
+  
+  // Dispose root scope (cancels all tasks)
+  await closeKoaScope()
+  
+  // Close HTTP server
+  server.close(() => {
+    console.log('Server closed')
+    process.exit(0)
+  })
+}
+
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use state for scope access">
+    Always access scopes via `ctx.state.scope` or use the helper function `getScope(ctx)`.
+  </Accordion>
+
+  <Accordion title="Apply middleware early">
+    Register `koaGoGoScope()` before route handlers to ensure scopes are available.
+  </Accordion>
+
+  <Accordion title="Handle errors in middleware">
+    Set appropriate HTTP status codes when tasks fail.
+  </Accordion>
+
+  <Accordion title="Implement graceful shutdown">
+    Always call `closeKoaScope()` before closing the HTTP server.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Express Adapter" icon="node" href="/api/adapters/express">
+    Express middleware integration
+  </Card>
+  <Card title="Hapi Adapter" icon="puzzle-piece" href="/api/adapters/hapi">
+    Hapi plugin integration
+  </Card>
+  <Card title="Fastify Adapter" icon="bolt" href="/api/adapters/fastify">
+    Fastify plugin integration
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

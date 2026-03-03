@@ -1,0 +1,285 @@
+---
+title: Dependency injection
+description: Type-safe dependency injection with automatic lifecycle management
+---
+
+go-go-scope provides a powerful dependency injection system that integrates with structured concurrency, supporting service lifetimes, auto-wiring, and automatic cleanup.
+
+## Overview
+
+The DI system provides:
+
+- **Type-safe service registration** with service tokens
+- **Three service lifetimes**: singleton, scoped, transient
+- **Auto-wiring** of dependencies
+- **Automatic cleanup** when scopes are disposed
+- **Circular dependency detection**
+- **Integration with Scope** for lifecycle management
+
+## Basic usage
+
+<Steps>
+  <Step title="Define service tokens">
+    Create type-safe tokens for your services:
+
+    ```typescript
+    import { createToken, createContainer } from 'go-go-scope';
+
+    interface Database {
+      query(sql: string): Promise<any>;
+    }
+
+    interface UserService {
+      getUser(id: string): Promise<User>;
+    }
+
+    const DatabaseToken = createToken<Database>('Database');
+    const UserServiceToken = createToken<UserService>('UserService');
+    ```
+  </Step>
+
+  <Step title="Register services">
+    Register services with their factories and dependencies:
+
+    ```typescript
+    const container = createContainer()
+      .register(DatabaseToken, {
+        lifetime: 'singleton',
+        factory: () => new PostgresDatabase(),
+        dispose: (db) => db.close()
+      })
+      .register(UserServiceToken, {
+        lifetime: 'scoped',
+        dependencies: [DatabaseToken],
+        factory: ({ [DatabaseToken]: db }) => new UserService(db)
+      });
+    ```
+  </Step>
+
+  <Step title="Resolve services in a scope">
+    Services are automatically created and cleaned up:
+
+    ```typescript
+    await using s = scope();
+    
+    const userService = await container.resolve(s, UserServiceToken);
+    const user = await userService.getUser('123');
+    // Scoped services cleaned up when scope disposed
+    ```
+  </Step>
+</Steps>
+
+## Service lifetimes
+
+### Singleton
+
+Created once and shared across all scopes:
+
+```typescript
+container.register(DatabaseToken, {
+  lifetime: 'singleton',
+  factory: () => new Database()
+});
+```
+
+<Note>
+Singleton instances are **not** automatically disposed. If you need cleanup, register a dispose function.
+</Note>
+
+### Scoped
+
+Created once per scope:
+
+```typescript
+container.register(UserServiceToken, {
+  lifetime: 'scoped',
+  factory: () => new UserService()
+});
+```
+
+Scoped services are automatically disposed when the scope is disposed.
+
+### Transient
+
+Created every time they're resolved:
+
+```typescript
+container.register(RequestContextToken, {
+  lifetime: 'transient',
+  factory: () => ({ id: generateId(), timestamp: Date.now() })
+});
+```
+
+## Auto-wiring dependencies
+
+Services can declare their dependencies, which are automatically injected:
+
+```typescript
+const CacheToken = createToken<Cache>('Cache');
+const DatabaseToken = createToken<Database>('Database');
+const UserServiceToken = createToken<UserService>('UserService');
+
+const container = createContainer()
+  .register(CacheToken, {
+    lifetime: 'singleton',
+    factory: () => new RedisCache()
+  })
+  .register(DatabaseToken, {
+    lifetime: 'singleton',
+    factory: () => new PostgresDB()
+  })
+  .register(UserServiceToken, {
+    lifetime: 'scoped',
+    dependencies: [DatabaseToken, CacheToken],
+    factory: ({ [DatabaseToken]: db, [CacheToken]: cache }) => 
+      new UserService(db, cache)
+  });
+```
+
+## Modules for organization
+
+Organize related services into modules:
+
+```typescript
+import { createModule } from 'go-go-scope';
+
+const databaseModule = createModule((builder) => {
+  builder.register(DatabaseToken, {
+    lifetime: 'singleton',
+    factory: () => new PostgresDatabase()
+  });
+  
+  builder.register(CacheToken, {
+    lifetime: 'singleton',
+    factory: () => new RedisCache()
+  });
+});
+
+const serviceModule = createModule((builder) => {
+  builder.register(UserServiceToken, {
+    lifetime: 'scoped',
+    dependencies: [DatabaseToken, CacheToken],
+    factory: ({ [DatabaseToken]: db, [CacheToken]: cache }) =>
+      new UserService(db, cache)
+  });
+});
+
+const container = createContainer()
+  .use(databaseModule)
+  .use(serviceModule);
+```
+
+## Service providers
+
+Create reusable service providers:
+
+```typescript
+import { createServiceProvider } from 'go-go-scope';
+
+const provider = createServiceProvider()
+  .provide(DatabaseToken, () => new Database())
+  .provide(UserServiceToken, (db: Database) => new UserService(db));
+
+await using s = scope();
+const userService = await provider.get(s, UserServiceToken);
+```
+
+## Decorators (experimental)
+
+Use decorators for class-based dependency injection:
+
+```typescript
+import { injectable, inject } from 'go-go-scope';
+
+@injectable()
+class UserService {
+  constructor(
+    @inject(DatabaseToken) private db: Database,
+    @inject(CacheToken) private cache: Cache
+  ) {}
+
+  async getUser(id: string) {
+    const cached = await this.cache.get(`user:${id}`);
+    if (cached) return cached;
+    
+    const user = await this.db.query('SELECT * FROM users WHERE id = ?', [id]);
+    await this.cache.set(`user:${id}`, user);
+    return user;
+  }
+}
+```
+
+<Warning>
+Decorators require TypeScript 5.0+ with `experimentalDecorators: true` in tsconfig.json.
+</Warning>
+
+## Integration with Scope
+
+Services integrate seamlessly with scope lifecycle:
+
+```typescript
+await using s = scope();
+
+// Resolve services
+const db = await container.resolve(s, DatabaseToken);
+const userService = await container.resolve(s, UserServiceToken);
+
+// Use services
+const user = await userService.getUser('123');
+
+// Automatic cleanup when scope disposed
+```
+
+Scoped services are automatically registered with the scope's disposal queue.
+
+## Best practices
+
+<AccordionGroup>
+  <Accordion title="Prefer singleton for expensive resources">
+    Database connections, HTTP clients, and other expensive resources should be singletons:
+
+    ```typescript
+    container.register(DatabaseToken, {
+      lifetime: 'singleton',
+      factory: () => createConnection(process.env.DATABASE_URL),
+      dispose: (db) => db.close()
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Use scoped for request-specific state">
+    Request contexts, user sessions, and transaction managers should be scoped:
+
+    ```typescript
+    container.register(RequestContextToken, {
+      lifetime: 'scoped',
+      factory: () => ({ requestId: generateId() })
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Avoid circular dependencies">
+    The DI system detects circular dependencies and throws an error. Refactor to break cycles:
+
+    ```typescript
+    // Bad - circular dependency
+    A depends on B
+    B depends on A
+
+    // Good - extract shared logic
+    A depends on C
+    B depends on C
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Scopes and tasks" icon="layer-group" href="/concepts/scopes-and-tasks">
+    Learn about scope lifecycle
+  </Card>
+  <Card title="Automatic cleanup" icon="broom" href="/concepts/automatic-cleanup">
+    Understand resource disposal
+  </Card>
+</CardGroup>

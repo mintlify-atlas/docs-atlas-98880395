@@ -1,0 +1,251 @@
+---
+title: Fastify Adapter
+description: Request-scoped structured concurrency for Fastify applications
+---
+
+The Fastify adapter provides seamless integration of go-go-scope with Fastify applications through a plugin-based architecture.
+
+## Installation
+
+```bash
+npm install @go-go-scope/adapter-fastify go-go-scope fastify
+```
+
+## Quick Start
+
+```typescript
+import fastify from 'fastify'
+import { fastifyGoGoScope } from '@go-go-scope/adapter-fastify'
+
+const app = fastify()
+
+// Register the plugin
+await app.register(fastifyGoGoScope, {
+  name: 'my-api',
+  timeout: 30000 // Optional: default timeout for all requests
+})
+
+app.get('/users/:id', async (request, reply) => {
+  // Access request-scoped scope
+  const [err, user] = await request.scope.task(
+    () => fetchUser(request.params.id),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) {
+    return reply.code(500).send({ error: err.message })
+  }
+  return user
+})
+
+await app.listen({ port: 3000 })
+```
+
+## Configuration Options
+
+<ParamField path="name" type="string" default="'fastify-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+## Plugin Architecture
+
+<Steps>
+  <Step title="Root Scope Creation">
+    The plugin creates a single root scope when registered, accessible via `fastify.scope`
+  </Step>
+  
+  <Step title="Request Scope Creation">
+    On each request, a child scope is created with the root as parent, accessible via `request.scope`
+  </Step>
+  
+  <Step title="Automatic Cleanup">
+    Request scopes are automatically disposed after the response is sent
+  </Step>
+  
+  <Step title="Graceful Shutdown">
+    The root scope is disposed when Fastify closes
+  </Step>
+</Steps>
+
+## Usage Examples
+
+### Parallel Data Fetching
+
+```typescript
+app.get('/dashboard', async (request, reply) => {
+  const [err, results] = await request.scope.parallel(
+    [
+      () => fetchUserProfile(),
+      () => fetchRecentOrders(),
+      () => fetchRecommendations()
+    ],
+    { concurrency: 3 }
+  )
+
+  if (err) {
+    return reply.code(500).send({ error: err.message })
+  }
+
+  return {
+    profile: results[0],
+    orders: results[1],
+    recommendations: results[2]
+  }
+})
+```
+
+### Circuit Breaker Pattern
+
+```typescript
+import { CircuitBreaker } from 'go-go-scope'
+
+const breaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000
+})
+
+await app.register(fastifyGoGoScope, {
+  name: 'resilient-api',
+  circuitBreaker: breaker
+})
+
+app.get('/external-api', async (request, reply) => {
+  // Automatically uses circuit breaker
+  const [err, data] = await request.scope.task(
+    () => fetchExternalAPI()
+  )
+
+  if (err) {
+    return reply.code(503).send({ error: 'Service unavailable' })
+  }
+  return data
+})
+```
+
+### Channel-based Communication
+
+```typescript
+app.get('/stream-events', async (request, reply) => {
+  const channel = request.scope.channel({ buffer: 100 })
+
+  // Producer task
+  request.scope.task(async ({ signal }) => {
+    for (let i = 0; i < 100; i++) {
+      if (signal.aborted) break
+      await channel.send({ event: 'update', data: i })
+      await new Promise(r => setTimeout(r, 100))
+    }
+    channel.close()
+  })
+
+  // Stream to response
+  reply.header('Content-Type', 'text/event-stream')
+  
+  for await (const event of channel) {
+    reply.raw.write(`data: ${JSON.stringify(event)}\n\n`)
+  }
+  
+  reply.raw.end()
+})
+```
+
+### Using Root Scope
+
+```typescript
+await app.register(fastifyGoGoScope, { name: 'my-api' })
+
+// Access root scope for application-level tasks
+app.ready(() => {
+  app.scope.task(async () => {
+    // Start background job that lives for app lifetime
+    await startMetricsCollector()
+  })
+})
+```
+
+## Type Augmentation
+
+The adapter automatically augments Fastify types:
+
+```typescript
+declare module 'fastify' {
+  interface FastifyInstance {
+    scope: Scope
+  }
+  interface FastifyRequest {
+    scope: Scope
+  }
+}
+```
+
+## Lifecycle Hooks
+
+The plugin integrates with Fastify hooks:
+
+<CodeGroup>
+```typescript onRequest
+// Request scope is created before route handler
+fastify.addHook('onRequest', async (request) => {
+  // request.scope is now available
+  request.scope = scope({
+    parent: rootScope,
+    name: `request-${request.id}`
+  })
+})
+```
+
+```typescript onResponse
+// Request scope is disposed after response
+fastify.addHook('onResponse', async (request) => {
+  await request.scope[Symbol.asyncDispose]()
+})
+```
+
+```typescript onClose
+// Root scope is disposed on server shutdown
+fastify.addHook('onClose', async () => {
+  await rootScope[Symbol.asyncDispose]()
+})
+```
+</CodeGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use request scope for request-specific tasks">
+    Always use `request.scope.task()` for operations tied to a single request. This ensures automatic cancellation when the request completes.
+  </Accordion>
+
+  <Accordion title="Use root scope for background jobs">
+    Use `fastify.scope.task()` for application-level tasks that should live beyond individual requests.
+  </Accordion>
+
+  <Accordion title="Set appropriate timeouts">
+    Configure both global timeouts (plugin options) and per-task timeouts to prevent hanging requests.
+  </Accordion>
+
+  <Accordion title="Handle errors gracefully">
+    Always check the error value in result tuples and return appropriate HTTP status codes.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Express Adapter" icon="node" href="/api/adapters/express">
+    Express middleware integration
+  </Card>
+  <Card title="NestJS Adapter" icon="code" href="/api/adapters/nestjs">
+    Dependency injection for NestJS
+  </Card>
+  <Card title="Hono Adapter" icon="bolt" href="/api/adapters/hono">
+    Lightweight Hono middleware
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

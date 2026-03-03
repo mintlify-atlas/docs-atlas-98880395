@@ -1,0 +1,427 @@
+---
+title: NestJS Adapter
+description: Dependency injection integration for NestJS applications
+---
+
+The NestJS adapter provides native dependency injection integration with go-go-scope through services, modules, and decorators.
+
+## Installation
+
+```bash
+npm install @go-go-scope/adapter-nestjs go-go-scope @nestjs/common @nestjs/core
+```
+
+## Quick Start
+
+```typescript
+import { Module, Injectable, Controller, Get } from '@nestjs/common'
+import { NestFactory } from '@nestjs/core'
+import {
+  GoGoScopeModule,
+  GoGoRequestScopeService,
+  Task
+} from '@go-go-scope/adapter-nestjs'
+
+@Injectable()
+class UserService {
+  constructor(private requestScope: GoGoRequestScopeService) {}
+
+  async getUser(id: string) {
+    const scope = this.requestScope.getScope()
+    const [err, user] = await scope.task(
+      () => fetchUser(id),
+      { retry: 'exponential', timeout: 5000 }
+    )
+
+    if (err) throw err
+    return user
+  }
+}
+
+@Controller('users')
+class UserController {
+  constructor(private userService: UserService) {}
+
+  @Get(':id')
+  async getUser(@Param('id') id: string) {
+    return this.userService.getUser(id)
+  }
+}
+
+@Module({
+  imports: [GoGoScopeModule.forRoot({ name: 'my-api', timeout: 30000 })],
+  controllers: [UserController],
+  providers: [UserService]
+})
+class AppModule {}
+
+const app = await NestFactory.create(AppModule)
+await app.listen(3000)
+```
+
+## Module Registration
+
+<ParamField path="name" type="string" default="'nestjs-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+```typescript
+@Module({
+  imports: [
+    GoGoScopeModule.forRoot({
+      name: 'production-api',
+      timeout: 15000
+    })
+  ]
+})
+export class AppModule {}
+```
+
+## Services
+
+### GoGoScopeService
+
+Provides access to the root application scope.
+
+```typescript
+import { Injectable } from '@nestjs/common'
+import { GoGoScopeService } from '@go-go-scope/adapter-nestjs'
+
+@Injectable()
+class BackgroundJobService {
+  constructor(private scopeService: GoGoScopeService) {}
+
+  async startJob() {
+    // Use root scope for application-level tasks
+    const [err] = await this.scopeService.rootScope.task(
+      async ({ signal }) => {
+        while (!signal.aborted) {
+          await this.processQueue()
+          await new Promise(r => setTimeout(r, 5000))
+        }
+      }
+    )
+
+    if (err) console.error('Job failed:', err)
+  }
+
+  createChildScope(name: string) {
+    return this.scopeService.createScope(name, {
+      timeout: 10000
+    })
+  }
+}
+```
+
+### GoGoRequestScopeService
+
+Provides a unique scope per HTTP request (REQUEST-scoped).
+
+```typescript
+import { Injectable, Scope } from '@nestjs/common'
+import { GoGoRequestScopeService } from '@go-go-scope/adapter-nestjs'
+
+@Injectable({ scope: Scope.REQUEST })
+class RequestScopedService {
+  constructor(private requestScope: GoGoRequestScopeService) {}
+
+  async fetchData() {
+    const scope = this.requestScope.getScope()
+    
+    const [err, data] = await scope.parallel([
+      () => this.fetchFromAPI1(),
+      () => this.fetchFromAPI2(),
+      () => this.fetchFromAPI3()
+    ])
+
+    if (err) throw err
+    return data
+  }
+}
+```
+
+## Decorators
+
+### @Task Decorator
+
+Automatically execute methods within a task scope:
+
+```typescript
+import { Injectable } from '@nestjs/common'
+import { Task, GoGoRequestScopeService } from '@go-go-scope/adapter-nestjs'
+
+@Injectable()
+class PaymentService {
+  @Task({ retry: 'exponential', timeout: 10000 })
+  async processPayment(amount: number, cardToken: string) {
+    // Automatically wrapped in a task with retry and timeout
+    const result = await paymentGateway.charge(amount, cardToken)
+    return result
+  }
+
+  @Task({ retry: 'linear' })
+  async refundPayment(transactionId: string) {
+    return await paymentGateway.refund(transactionId)
+  }
+}
+```
+
+## Dependency Injection Patterns
+
+<Steps>
+  <Step title="Import GoGoScopeModule">
+    Register the module with `forRoot()` in your root module
+  </Step>
+  
+  <Step title="Inject Services">
+    Inject `GoGoScopeService` or `GoGoRequestScopeService` into your providers
+  </Step>
+  
+  <Step title="Use Scopes">
+    Access `rootScope` for app-level tasks or `requestScope.getScope()` for request-scoped tasks
+  </Step>
+  
+  <Step title="Automatic Cleanup">
+    Scopes are automatically disposed via `OnModuleDestroy` lifecycle hook
+  </Step>
+</Steps>
+
+## Usage Examples
+
+### Controller with Request Scope
+
+```typescript
+import { Controller, Get, Inject } from '@nestjs/common'
+import { GoGoRequestScopeService } from '@go-go-scope/adapter-nestjs'
+
+@Controller('dashboard')
+export class DashboardController {
+  constructor(private requestScope: GoGoRequestScopeService) {}
+
+  @Get()
+  async getDashboard() {
+    const scope = this.requestScope.getScope()
+
+    const [err, results] = await scope.parallel([
+      () => this.getUserStats(),
+      () => this.getRecentActivity(),
+      () => this.getNotifications()
+    ])
+
+    if (err) {
+      throw new HttpException(
+        'Failed to load dashboard',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      )
+    }
+
+    return {
+      stats: results[0],
+      activity: results[1],
+      notifications: results[2]
+    }
+  }
+}
+```
+
+### Background Service with Root Scope
+
+```typescript
+import { Injectable, OnModuleInit } from '@nestjs/common'
+import { GoGoScopeService } from '@go-go-scope/adapter-nestjs'
+
+@Injectable()
+export class MetricsCollector implements OnModuleInit {
+  constructor(private scopeService: GoGoScopeService) {}
+
+  onModuleInit() {
+    // Start background collection using root scope
+    this.scopeService.rootScope.task(async ({ signal }) => {
+      while (!signal.aborted) {
+        await this.collectMetrics()
+        await new Promise(r => setTimeout(r, 60000)) // Every minute
+      }
+    })
+  }
+
+  private async collectMetrics() {
+    // Collect and store metrics
+  }
+}
+```
+
+### Service with Circuit Breaker
+
+```typescript
+import { Injectable } from '@nestjs/common'
+import { GoGoRequestScopeService } from '@go-go-scope/adapter-nestjs'
+import { CircuitBreaker } from 'go-go-scope'
+
+@Injectable()
+export class ExternalAPIService {
+  private breaker = new CircuitBreaker({
+    failureThreshold: 5,
+    resetTimeout: 30000
+  })
+
+  constructor(private requestScope: GoGoRequestScopeService) {}
+
+  async callExternalAPI(endpoint: string) {
+    const scope = this.requestScope.getScope()
+    
+    const [err, response] = await scope.task(
+      async ({ signal }) => {
+        return this.breaker.execute(
+          () => fetch(endpoint, { signal })
+        )
+      }
+    )
+
+    if (err) {
+      if (this.breaker.state === 'open') {
+        throw new ServiceUnavailableException('Circuit breaker open')
+      }
+      throw err
+    }
+
+    return response
+  }
+}
+```
+
+### Custom Scope Provider
+
+```typescript
+import { Module, Scope } from '@nestjs/common'
+import { GoGoScopeService } from '@go-go-scope/adapter-nestjs'
+import type { Scope as GoGoScope } from 'go-go-scope'
+
+const CUSTOM_SCOPE = Symbol('CUSTOM_SCOPE')
+
+@Module({
+  providers: [
+    {
+      provide: CUSTOM_SCOPE,
+      scope: Scope.REQUEST,
+      useFactory: (scopeService: GoGoScopeService): GoGoScope => {
+        return scopeService.createScope('custom', {
+          timeout: 5000
+        })
+      },
+      inject: [GoGoScopeService]
+    }
+  ],
+  exports: [CUSTOM_SCOPE]
+})
+export class CustomScopeModule {}
+```
+
+## Testing
+
+### Unit Testing with Mock Scopes
+
+```typescript
+import { Test } from '@nestjs/testing'
+import { GoGoRequestScopeService } from '@go-go-scope/adapter-nestjs'
+import { scope } from 'go-go-scope'
+
+describe('UserService', () => {
+  let service: UserService
+  let mockRequestScope: GoGoRequestScopeService
+
+  beforeEach(async () => {
+    // Create mock scope
+    const testScope = scope({ name: 'test' })
+    
+    mockRequestScope = {
+      requestScope: testScope,
+      getScope: () => testScope,
+      onModuleDestroy: async () => {}
+    } as any
+
+    const module = await Test.createTestingModule({
+      providers: [
+        UserService,
+        {
+          provide: GoGoRequestScopeService,
+          useValue: mockRequestScope
+        }
+      ]
+    }).compile()
+
+    service = module.get(UserService)
+  })
+
+  it('should fetch user', async () => {
+    const user = await service.getUser('123')
+    expect(user).toBeDefined()
+  })
+})
+```
+
+## Lifecycle Integration
+
+The adapter integrates with NestJS lifecycle hooks:
+
+<CodeGroup>
+```typescript OnModuleDestroy
+@Injectable()
+export class GoGoScopeService implements OnModuleDestroy {
+  async onModuleDestroy() {
+    // Root scope disposed automatically
+    await this.rootScope[Symbol.asyncDispose]()
+  }
+}
+```
+
+```typescript OnModuleDestroy (Request)
+@Injectable({ scope: Scope.REQUEST })
+export class GoGoRequestScopeService implements OnModuleDestroy {
+  async onModuleDestroy() {
+    // Request scope disposed automatically
+    await this.requestScope[Symbol.asyncDispose]()
+  }
+}
+```
+</CodeGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use REQUEST scope for request-specific tasks">
+    Inject `GoGoRequestScopeService` with `{ scope: Scope.REQUEST }` for services that handle request-specific logic.
+  </Accordion>
+
+  <Accordion title="Use root scope for background jobs">
+    Inject `GoGoScopeService` for application-level background tasks that outlive requests.
+  </Accordion>
+
+  <Accordion title="Leverage @Task decorator">
+    Use the `@Task` decorator for automatic retry and timeout handling on service methods.
+  </Accordion>
+
+  <Accordion title="Combine with Guards and Interceptors">
+    Scopes work seamlessly with NestJS guards, interceptors, and pipes.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Fastify Adapter" icon="bolt" href="/api/adapters/fastify">
+    Fastify plugin integration
+  </Card>
+  <Card title="Express Adapter" icon="node" href="/api/adapters/express">
+    Express middleware integration
+  </Card>
+  <Card title="Dependency Injection" icon="syringe" href="/core/dependency-injection">
+    DI patterns in go-go-scope
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

@@ -1,0 +1,330 @@
+---
+title: Express Adapter
+description: Request-scoped structured concurrency for Express applications
+---
+
+The Express adapter provides middleware-based integration of go-go-scope with Express applications.
+
+## Installation
+
+```bash
+npm install @go-go-scope/adapter-express go-go-scope express
+```
+
+## Quick Start
+
+```typescript
+import express from 'express'
+import { goGoScope } from '@go-go-scope/adapter-express'
+
+const app = express()
+
+// Apply middleware
+app.use(goGoScope(app, {
+  name: 'my-api',
+  timeout: 30000 // Optional: default timeout for all requests
+}))
+
+app.get('/users/:id', async (req, res) => {
+  // Access request-scoped scope
+  const [err, user] = await req.scope.task(
+    () => fetchUser(req.params.id),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) {
+    return res.status(500).json({ error: err.message })
+  }
+  res.json(user)
+})
+
+const server = app.listen(3000)
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await closeScope(app)
+  server.close()
+})
+```
+
+## Configuration Options
+
+<ParamField path="name" type="string" default="'express-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+## Middleware Architecture
+
+<Steps>
+  <Step title="Root Scope Creation">
+    The middleware creates a single root scope, accessible via `app.scope`
+  </Step>
+  
+  <Step title="Request Scope Creation">
+    For each request, a child scope is created with the root as parent, accessible via `req.scope`
+  </Step>
+  
+  <Step title="Response Cleanup">
+    Request scopes are disposed on both `finish` and `close` events to handle streaming responses
+  </Step>
+  
+  <Step title="Manual Shutdown">
+    Call `closeScope(app)` during graceful shutdown to dispose the root scope
+  </Step>
+</Steps>
+
+## Usage Examples
+
+### Basic CRUD Operations
+
+<CodeGroup>
+```typescript GET
+app.get('/posts/:id', async (req, res) => {
+  const [err, post] = await req.scope.task(
+    () => db.posts.findById(req.params.id)
+  )
+
+  if (err) {
+    return res.status(404).json({ error: 'Post not found' })
+  }
+  res.json(post)
+})
+```
+
+```typescript POST
+app.post('/posts', async (req, res) => {
+  const [err, post] = await req.scope.task(
+    () => db.posts.create(req.body),
+    { retry: 'exponential', timeout: 5000 }
+  )
+
+  if (err) {
+    return res.status(500).json({ error: err.message })
+  }
+  res.status(201).json(post)
+})
+```
+
+```typescript DELETE
+app.delete('/posts/:id', async (req, res) => {
+  const [err] = await req.scope.task(
+    () => db.posts.delete(req.params.id)
+  )
+
+  if (err) {
+    return res.status(500).json({ error: err.message })
+  }
+  res.status(204).send()
+})
+```
+</CodeGroup>
+
+### Parallel Operations
+
+```typescript
+app.get('/aggregated-data', async (req, res) => {
+  const userId = req.query.userId
+
+  const [err, results] = await req.scope.parallel([
+    () => fetchUserProfile(userId),
+    () => fetchUserPosts(userId),
+    () => fetchUserFollowers(userId)
+  ])
+
+  if (err) {
+    return res.status(500).json({ error: err.message })
+  }
+
+  res.json({
+    profile: results[0],
+    posts: results[1],
+    followers: results[2]
+  })
+})
+```
+
+### Streaming Responses
+
+```typescript
+app.get('/stream-logs', async (req, res) => {
+  const channel = req.scope.channel({ buffer: 50 })
+
+  // Producer: tail log file
+  req.scope.task(async ({ signal }) => {
+    for await (const line of tailLogFile(signal)) {
+      await channel.send(line)
+    }
+    channel.close()
+  })
+
+  res.setHeader('Content-Type', 'text/plain')
+  res.setHeader('Transfer-Encoding', 'chunked')
+
+  // Consumer: stream to response
+  for await (const line of channel) {
+    res.write(line + '\n')
+  }
+  
+  res.end()
+})
+```
+
+### Error Handling Middleware
+
+```typescript
+import { goGoScope, closeScope } from '@go-go-scope/adapter-express'
+
+app.use(goGoScope(app, { name: 'my-api' }))
+
+// Custom error handler
+app.use((err, req, res, next) => {
+  // Scope errors are automatically propagated
+  if (err.name === 'TimeoutError') {
+    return res.status(504).json({ error: 'Request timeout' })
+  }
+  if (err.name === 'AbortError') {
+    return res.status(499).json({ error: 'Request cancelled' })
+  }
+  res.status(500).json({ error: 'Internal server error' })
+})
+```
+
+### Background Tasks
+
+```typescript
+const app = express()
+app.use(goGoScope(app, { name: 'worker-api' }))
+
+// Start background job using root scope
+app.scope.task(async ({ signal }) => {
+  while (!signal.aborted) {
+    await processQueue()
+    await new Promise(r => setTimeout(r, 1000))
+  }
+})
+
+app.listen(3000)
+```
+
+## Graceful Shutdown
+
+The adapter provides a `closeScope` helper for graceful shutdown:
+
+```typescript
+import { closeScope } from '@go-go-scope/adapter-express'
+
+const server = app.listen(3000)
+
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gracefully...')
+  
+  // Dispose root scope (cancels all tasks)
+  await closeScope(app)
+  
+  // Close HTTP server
+  server.close(() => {
+    console.log('Server closed')
+    process.exit(0)
+  })
+})
+```
+
+## Type Augmentation
+
+The adapter automatically augments Express types:
+
+```typescript
+declare global {
+  namespace Express {
+    interface Request {
+      scope: Scope
+    }
+    interface Application {
+      scope: Scope
+    }
+  }
+}
+```
+
+## Request ID Generation
+
+Each request scope has a unique name:
+
+```typescript
+// Format: request-{timestamp}-{random}
+const scopeName = `request-${Date.now()}-${Math.random().toString(36).slice(2)}`
+```
+
+For custom request IDs, use a request ID middleware before the scope middleware:
+
+```typescript
+import { v4 as uuidv4 } from 'uuid'
+
+app.use((req, res, next) => {
+  req.id = uuidv4()
+  next()
+})
+
+app.use(goGoScope(app))
+```
+
+## Response Lifecycle
+
+The middleware handles both `finish` and `close` events:
+
+<CodeGroup>
+```typescript finish Event
+// Normal response completion
+res.on('finish', () => {
+  req.scope[Symbol.asyncDispose]().catch(() => {})
+})
+```
+
+```typescript close Event
+// Client disconnection during streaming
+res.on('close', () => {
+  req.scope[Symbol.asyncDispose]().catch(() => {})
+})
+```
+</CodeGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Apply middleware early">
+    Register the go-go-scope middleware before route handlers to ensure scopes are available.
+  </Accordion>
+
+  <Accordion title="Always handle errors">
+    Check error values in result tuples and return appropriate HTTP status codes.
+  </Accordion>
+
+  <Accordion title="Use streaming for large responses">
+    Leverage channels for streaming responses to handle backpressure automatically.
+  </Accordion>
+
+  <Accordion title="Implement graceful shutdown">
+    Always call `closeScope(app)` before closing the HTTP server.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Fastify Adapter" icon="bolt" href="/api/adapters/fastify">
+    Plugin-based Fastify integration
+  </Card>
+  <Card title="Koa Adapter" icon="layer-group" href="/api/adapters/koa">
+    Koa middleware integration
+  </Card>
+  <Card title="NestJS Adapter" icon="code" href="/api/adapters/nestjs">
+    Dependency injection for NestJS
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

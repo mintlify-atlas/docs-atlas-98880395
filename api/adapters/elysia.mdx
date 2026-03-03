@@ -1,0 +1,421 @@
+---
+title: Elysia Adapter
+description: Native Bun-first adapter for Elysia applications
+---
+
+The Elysia adapter provides native Bun integration with go-go-scope through Elysia's plugin system.
+
+## Installation
+
+```bash
+bun add @go-go-scope/adapter-elysia go-go-scope elysia
+```
+
+## Quick Start
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope({
+    name: 'elysia-api',
+    timeout: 30000 // Optional: default timeout for all requests
+  }))
+  .get('/users/:id', async ({ scope, params }) => {
+    const [err, user] = await scope.task(
+      () => fetchUser(params.id),
+      { retry: 'exponential', timeout: 5000 }
+    )
+
+    if (err) {
+      return { error: err.message }
+    }
+    return user
+  })
+  .listen(3000)
+
+console.log(`Server running at http://localhost:${app.server?.port}`)
+```
+
+## Configuration Options
+
+<ParamField path="name" type="string" default="'elysia-app'">
+  Name for the root application scope
+</ParamField>
+
+<ParamField path="timeout" type="number" optional>
+  Default timeout in milliseconds for all request scopes
+</ParamField>
+
+## Plugin Architecture
+
+<Steps>
+  <Step title="State Setup">
+    The plugin stores the root scope in Elysia's global state
+  </Step>
+  
+  <Step title="Request Hook">
+    On each request, a child scope is created and stored using a symbol key
+  </Step>
+  
+  <Step title="Derived Context">
+    The `scope` and `rootScope` are injected into context via `.derive()`
+  </Step>
+  
+  <Step title="Cleanup Hook">
+    Request scopes are disposed in the `onAfterResponse` hook
+  </Step>
+</Steps>
+
+## Usage Examples
+
+### REST API
+
+<CodeGroup>
+```typescript GET
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/posts/:id', async ({ scope, params, set }) => {
+    const [err, post] = await scope.task(
+      () => db.posts.findById(params.id)
+    )
+
+    if (err) {
+      set.status = 404
+      return { error: 'Post not found' }
+    }
+    return post
+  })
+  .listen(3000)
+```
+
+```typescript POST
+const app = new Elysia()
+  .use(goGoScope())
+  .post('/posts', async ({ scope, body, set }) => {
+    const [err, post] = await scope.task(
+      () => db.posts.create(body),
+      { retry: 'exponential', timeout: 5000 }
+    )
+
+    if (err) {
+      set.status = 500
+      return { error: err.message }
+    }
+    
+    set.status = 201
+    return post
+  })
+  .listen(3000)
+```
+
+```typescript DELETE
+const app = new Elysia()
+  .use(goGoScope())
+  .delete('/posts/:id', async ({ scope, params, set }) => {
+    const [err] = await scope.task(
+      () => db.posts.delete(params.id)
+    )
+
+    if (err) {
+      set.status = 500
+      return { error: err.message }
+    }
+    
+    set.status = 204
+  })
+  .listen(3000)
+```
+</CodeGroup>
+
+### Parallel Operations
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/dashboard/:userId', async ({ scope, params }) => {
+    const [err, results] = await scope.parallel([
+      () => fetchProfile(params.userId),
+      () => fetchPosts(params.userId),
+      () => fetchFollowers(params.userId)
+    ])
+
+    if (err) {
+      return { error: 'Failed to load dashboard' }
+    }
+
+    return {
+      profile: results[0],
+      posts: results[1],
+      followers: results[2]
+    }
+  })
+  .listen(3000)
+```
+
+### Server-Sent Events
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/events', async ({ scope, set }) => {
+    set.headers['Content-Type'] = 'text/event-stream'
+    set.headers['Cache-Control'] = 'no-cache'
+    set.headers['Connection'] = 'keep-alive'
+
+    const channel = scope.channel({ buffer: 100 })
+
+    // Producer
+    scope.task(async ({ signal }) => {
+      for (let i = 0; i < 50; i++) {
+        if (signal.aborted) break
+        await channel.send({ event: 'update', data: i })
+        await new Promise(r => setTimeout(r, 1000))
+      }
+      channel.close()
+    })
+
+    // Stream events
+    return new Response(
+      new ReadableStream({
+        async start(controller) {
+          for await (const message of channel) {
+            controller.enqueue(
+              `data: ${JSON.stringify(message)}\n\n`
+            )
+          }
+          controller.close()
+        }
+      })
+    )
+  })
+  .listen(3000)
+```
+
+### Circuit Breaker
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+import { CircuitBreaker } from 'go-go-scope'
+
+const breaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000
+})
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/external', async ({ scope, set }) => {
+    const [err, response] = await scope.task(async ({ signal }) => {
+      return breaker.execute(() =>
+        fetch('https://external-api.com/data', { signal })
+      )
+    })
+
+    if (err) {
+      if (breaker.state === 'open') {
+        set.status = 503
+        return { error: 'Service unavailable' }
+      }
+      set.status = 500
+      return { error: err.message }
+    }
+
+    return await response.json()
+  })
+  .listen(3000)
+```
+
+### Plugin Composition
+
+```typescript
+import { Elysia } from 'elysia'
+import { cors } from '@elysiajs/cors'
+import { swagger } from '@elysiajs/swagger'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(cors())
+  .use(swagger())
+  .use(goGoScope({ name: 'my-api' }))
+  .get('/data', async ({ scope }) => {
+    const [err, data] = await scope.task(() => fetchData())
+    if (err) return { error: err.message }
+    return data
+  })
+  .listen(3000)
+```
+
+### WebSocket with Scope
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope, getScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .ws('/ws', {
+    message(ws, message) {
+      // Note: WebSocket handlers don't have request scope
+      // Use rootScope or create a custom scope
+    },
+    open(ws) {
+      console.log('WebSocket opened')
+    },
+    close(ws) {
+      console.log('WebSocket closed')
+    }
+  })
+  .listen(3000)
+```
+
+### Background Jobs with Root Scope
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope({ name: 'worker-api' }))
+  .get('/', ({ rootScope }) => {
+    // Access root scope for background tasks
+    rootScope.task(async ({ signal }) => {
+      while (!signal.aborted) {
+        await processQueue()
+        await new Promise(r => setTimeout(r, 5000))
+      }
+    })
+
+    return { status: 'ok' }
+  })
+  .listen(3000)
+```
+
+## Helper Functions
+
+### getScope(context)
+
+Retrieves the request scope from the Elysia context:
+
+```typescript
+import { getScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/data', async (context) => {
+    const scope = getScope(context)
+    const [err, data] = await scope.task(() => fetchData())
+    return data
+  })
+```
+
+### getRootScope(context)
+
+Retrieves the root scope from the Elysia context:
+
+```typescript
+import { getRootScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/health', async (context) => {
+    const rootScope = getRootScope(context)
+    return { status: 'ok' }
+  })
+```
+
+## Bun-Specific Features
+
+The adapter leverages Bun's native capabilities:
+
+```typescript
+import { Elysia } from 'elysia'
+import { goGoScope } from '@go-go-scope/adapter-elysia'
+
+const app = new Elysia()
+  .use(goGoScope())
+  .get('/bun-specific', async ({ scope }) => {
+    const [err, data] = await scope.task(async () => {
+      // Use Bun's native fetch
+      const response = await fetch('https://api.example.com')
+      return response.json()
+    })
+
+    return data
+  })
+  .listen(3000)
+
+console.log(
+  `Running on Bun ${Bun.version} at http://localhost:${app.server?.port}`
+)
+```
+
+## Type Safety
+
+The plugin injects `scope` and `rootScope` into the Elysia context:
+
+```typescript
+// Automatically available in handlers
+app.get('/typed', async ({ scope, rootScope, params, query }) => {
+  // TypeScript knows the types
+  const [err, result] = await scope.task(() => fetchData())
+  return result
+})
+```
+
+## Performance
+
+Elysia with Bun offers exceptional performance:
+
+- Native Bun runtime speed
+- Zero-overhead plugin system
+- Minimal request scope allocation
+- Fast Symbol-based storage
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Leverage Bun's performance">
+    Take advantage of Bun's fast startup and native APIs for optimal performance.
+  </Accordion>
+
+  <Accordion title="Use derived context">
+    Access `scope` and `rootScope` directly from context - they're automatically injected.
+  </Accordion>
+
+  <Accordion title="Handle errors consistently">
+    Always destructure and check errors from task results for robust error handling.
+  </Accordion>
+
+  <Accordion title="Compose plugins">
+    Combine with other Elysia plugins like CORS, Swagger, and JWT for full-featured APIs.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Hono Adapter" icon="zap" href="/api/adapters/hono">
+    Lightweight Hono middleware
+  </Card>
+  <Card title="Fastify Adapter" icon="bolt" href="/api/adapters/fastify">
+    Fastify plugin integration
+  </Card>
+  <Card title="Bun Runtime" icon="package" href="/guides/bun">
+    Using go-go-scope with Bun
+  </Card>
+  <Card title="Core API" icon="book" href="/api/core">
+    Core go-go-scope concepts
+  </Card>
+</CardGroup>

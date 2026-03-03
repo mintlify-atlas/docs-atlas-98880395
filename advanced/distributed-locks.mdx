@@ -1,0 +1,277 @@
+---
+title: Distributed locks
+description: Distributed locking with persistence adapters for multi-process coordination
+---
+
+go-go-scope provides a unified lock API that works both in-memory and distributed across multiple processes using persistence adapters.
+
+## Overview
+
+The Lock API supports:
+
+- **In-memory locks** for single-process coordination (fast)
+- **Distributed locks** for multi-process coordination (Redis, PostgreSQL, etc.)
+- **Exclusive locks** (mutex) - single holder at a time
+- **Read-write locks** - multiple readers OR one writer
+- **Automatic cleanup** via `using` syntax
+- **Timeouts** to prevent deadlocks
+
+## Basic exclusive lock
+
+### In-memory
+
+```typescript
+import { scope, Lock } from 'go-go-scope';
+
+await using s = scope();
+const mutex = new Lock(s.signal);
+
+await using guard = await mutex.acquire();
+// Critical section - only one task can be here
+await performCriticalOperation();
+// Lock automatically released when guard is disposed
+```
+
+### Distributed (Redis)
+
+```typescript
+import { scope, Lock } from 'go-go-scope';
+import { RedisAdapter } from '@go-go-scope/persistence-redis';
+import Redis from 'ioredis';
+
+const redis = new Redis();
+const adapter = new RedisAdapter(redis);
+
+await using s = scope();
+const distLock = new Lock(s.signal, {
+  provider: adapter,
+  key: 'resource:123',
+  ttl: 30000, // 30 seconds
+  owner: process.env.WORKER_ID
+});
+
+await using guard = await distLock.acquire();
+// Critical section - only one process can be here
+await performCriticalOperation();
+```
+
+## Read-write locks
+
+Allow multiple concurrent readers OR one exclusive writer:
+
+```typescript
+const rwlock = new Lock(s.signal, { 
+  allowMultipleReaders: true,
+  provider: adapter,
+  key: 'data:users'
+});
+
+// Multiple readers can hold the lock simultaneously
+await using readGuard = await rwlock.read();
+const data = await readData();
+
+// Writer gets exclusive access
+await using writeGuard = await rwlock.write();
+await updateData();
+```
+
+<Note>
+Read locks can be acquired concurrently, but write locks are exclusive and block both readers and other writers.
+</Note>
+
+## Lock with timeout
+
+Prevent indefinite waiting:
+
+```typescript
+try {
+  await using guard = await mutex.acquire({ timeout: 5000 });
+  await performOperation();
+} catch (err) {
+  if (err.message.includes('timeout')) {
+    console.log('Could not acquire lock within 5 seconds');
+  }
+}
+```
+
+## Scope-level lock helper
+
+Convenience method on Scope:
+
+```typescript
+await using s = scope({
+  persistence: { lock: adapter }
+});
+
+// Acquire distributed lock via scope
+await using guard = await s.acquireLock('resource:123', { 
+  ttl: 30000 
+});
+await performOperation();
+```
+
+## Persistence adapters
+
+### Redis
+
+```typescript
+import { RedisAdapter } from '@go-go-scope/persistence-redis';
+import Redis from 'ioredis';
+
+const redis = new Redis({
+  host: process.env.REDIS_HOST,
+  port: 6379
+});
+
+const adapter = new RedisAdapter(redis);
+```
+
+### PostgreSQL
+
+```typescript
+import { PostgresAdapter } from '@go-go-scope/persistence-postgres';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
+
+const adapter = new PostgresAdapter(pool);
+```
+
+### MySQL
+
+```typescript
+import { MySQLAdapter } from '@go-go-scope/persistence-mysql';
+import mysql from 'mysql2/promise';
+
+const pool = mysql.createPool({
+  host: process.env.MYSQL_HOST,
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASSWORD,
+  database: process.env.MYSQL_DATABASE
+});
+
+const adapter = new MySQLAdapter(pool);
+```
+
+<CardGroup cols={2}>
+  <Card title="Redis adapter" icon="database" href="/api/persistence/redis">
+    Full Redis adapter documentation
+  </Card>
+  <Card title="PostgreSQL adapter" icon="database" href="/api/persistence/postgres">
+    Full PostgreSQL adapter documentation
+  </Card>
+  <Card title="MySQL adapter" icon="database" href="/api/persistence/mysql">
+    Full MySQL adapter documentation
+  </Card>
+  <Card title="MongoDB adapter" icon="database" href="/api/persistence/mongodb">
+    Full MongoDB adapter documentation
+  </Card>
+</CardGroup>
+
+## Lock TTL and renewal
+
+Distributed locks have a time-to-live (TTL) to prevent deadlocks:
+
+```typescript
+const lock = new Lock(s.signal, {
+  provider: adapter,
+  key: 'resource:123',
+  ttl: 30000 // Lock expires after 30 seconds
+});
+
+await using guard = await lock.acquire();
+// If operation takes > 30s, lock expires and another process can acquire it
+```
+
+<Warning>
+Choose a TTL longer than your expected operation duration. If the operation takes too long, the lock may expire and another process could acquire it.
+</Warning>
+
+## Priority-based lock acquisition
+
+```typescript
+await using highPriorityGuard = await mutex.acquire({ 
+  priority: 10 
+});
+
+await using lowPriorityGuard = await mutex.acquire({ 
+  priority: 1 
+});
+```
+
+Higher priority waiters acquire the lock first.
+
+## Best practices
+
+<AccordionGroup>
+  <Accordion title="Use the shortest critical section possible">
+    Only hold locks for the minimum time needed:
+
+    ```typescript
+    // Bad - long critical section
+    await using guard = await mutex.acquire();
+const data = await fetchData();
+    await processData(data);
+    await saveData(data);
+
+    // Good - minimal critical section
+    const data = await fetchData();
+    await processData(data);
+    
+    await using guard = await mutex.acquire();
+    await saveData(data);
+    ```
+  </Accordion>
+
+  <Accordion title="Always use timeouts">
+    Prevent indefinite blocking:
+
+    ```typescript
+    await using guard = await mutex.acquire({ timeout: 10000 });
+    ```
+  </Accordion>
+
+  <Accordion title="Use read-write locks for read-heavy workloads">
+    If you have many readers and few writers, use read-write locks:
+
+    ```typescript
+    const rwlock = new Lock(s.signal, { allowMultipleReaders: true });
+    
+    // Many concurrent readers
+    await using r1 = await rwlock.read();
+    await using r2 = await rwlock.read();
+    
+    // Exclusive writer
+    await using w = await rwlock.write();
+    ```
+  </Accordion>
+
+  <Accordion title="Use unique lock keys">
+    For distributed locks, use globally unique keys:
+
+    ```typescript
+    // Good
+    const lock = new Lock(s.signal, { 
+      key: `user:${userId}:profile` 
+    });
+
+    // Bad - too generic, high contention
+    const lock = new Lock(s.signal, { 
+      key: 'lock' 
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Resource pool" icon="layer-group" href="/api/resource-pool">
+    Managed resource pools with locks
+  </Card>
+  <Card title="Semaphore" icon="traffic-light" href="/api/semaphore">
+    Rate limiting with semaphores
+  </Card>
+</CardGroup>
